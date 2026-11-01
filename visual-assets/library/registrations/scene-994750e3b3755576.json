@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "id": "sakiko-reading-apricot-room4",
+  "character": "sakiko",
+  "activity": "reading",
+  "light": "morning",
+  "palette": "apricot",
+  "width": 1536,
+  "height": 1024,
+  "mother": "../room-studies/sakiko-reading-apricot-v2-mother.png",
+  "background": "../room-studies/room-study-0074-01a715a997f5.png",
+  "figure": "../production-components/production-component-0075-24046b83d784.png",
+  "mask": "../production-components/production-component-0076-9ef5c1297bbe.png",
+  "shadow": "../production-components/production-component-0077-9892602bc6b6.png",
+  "seat": [
+    0.883,
+    0.581
+  ],
+  "ground": [
+    0.736,
+    0.749
+  ],
+  "bodyBounds": [
+    0.6927083333333334,
+    0.30078125,
+    0.9772135416666666,
+    0.755859375
+  ],
+  "safeTextBoundary": 0.64,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "separate"
+  },
+  "contourComplete": true,
+  "hitPolygon": "88% 30%, 93% 32%, 97% 43%, 98% 47%, 95% 51%, 93% 59%, 87% 60%, 81% 59%, 78% 64%, 76% 73%, 77% 76%, 73% 76%, 70% 74%, 69% 71%, 73% 64%, 77% 55%, 80% 51%, 80% 47%, 84% 47%, 85% 40%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "environmentVariant": "clear-day",
+  "preservationScope": "Exact-canvas static design registration. Its presence grants no new layer, runtime, motion or generation-input approval.",
+  "historicalSceneRecordSha256": "994750e3b37555766565f2e000aab10aabf2125b7d5682a2a70f5419e1fad958",
+  "componentsNotIncluded": []
+}

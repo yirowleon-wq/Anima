@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "id": "sakiko-planning-apricot-room4",
+  "character": "sakiko",
+  "activity": "planning",
+  "light": "morning",
+  "palette": "apricot",
+  "width": 1536,
+  "height": 1024,
+  "mother": "../scene-studies/scene-study-0012-0458909a7b70.png",
+  "background": "../room-studies/room-study-0063-fddcc81c23ce.png",
+  "figure": "../production-components/production-component-0064-b1d550b9916b.png",
+  "mask": "../production-components/production-component-0065-362f63b0088a.png",
+  "seat": [
+    0.5963541667,
+    0.576171875
+  ],
+  "ground": [
+    0.6510416667,
+    0.736328125
+  ],
+  "bodyBounds": [
+    0.5338541667,
+    0.2978515625,
+    0.7135416667,
+    0.744140625
+  ],
+  "safeTextBoundary": 0.64,
+  "support": "desk-chair",
+  "contactShadow": {
+    "mode": "separate"
+  },
+  "contourComplete": true,
+  "hitPolygon": "59% 30%, 63% 30%, 65% 35%, 64% 44%, 69% 45%, 70% 48%, 67% 50%, 64% 50%, 65% 55%, 67% 57%, 68% 69%, 71% 72%, 71% 74%, 68% 74%, 66% 73%, 64% 74%, 63% 72%, 63% 62%, 61% 60%, 57% 59%, 55% 52%, 54% 48%, 54% 43%, 56% 35%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "shadow": "../production-components/production-component-0066-e72370d1c7ca.png",
+  "environmentVariant": "clear-day",
+  "preservationScope": "Exact-canvas static design registration. Its presence grants no new layer, runtime, motion or generation-input approval.",
+  "historicalSceneRecordSha256": "4644a6105449270b0eba23687511d9bfde178925574e0160a0f6225d6756e5b0",
+  "componentsNotIncluded": []
+}

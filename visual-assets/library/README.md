@@ -1,0 +1,28 @@
+# Kept artwork library
+
+These original artworks are part of Anima's working collection. They remain available even when the current application does not use them. The 948 currently retained files preserve their original dimensions, detail and pixels; 48 are separately identified technical production components. Their names and records distinguish a design study from an adopted runtime resource.
+
+Use [index.json](index.json) to find each file, its SHA-256, dimensions, observed composition, intended use and future stage. The current runtime resources remain in [../runtime](../runtime); keeping a study here does not change the current renderer or certify an animation.
+
+| Collection | What to look for | When to use it |
+| --- | --- | --- |
+| [Room studies](room-studies) | Sakiko's desk, open notebook, window bench, writing, reading, listening, play and return compositions; Anon's room alternatives; Umiri's seated appearance; two empty morning rooms | Read the character passport first, compare full original canvases, then use the first-character design work and stage 06 to choose an exact camera, light and contact arrangement. |
+| [Literary scenes](literary-scenes) | 339 complete character/activity/light compositions, with character, activity and light identified from their actual records | Use the chosen character's passport and stages 01/06/08 to compare complete supported poses, prop relationships, attention and return. A drawn book or invitation is not a source-reading or recovery receipt. |
+| [Scene studies](scene-studies) | 377 complete composition alternatives and interaction-oriented scene originals | Use each file's specific purpose and future-stage links with the matching full design material; preserve individual poses and light fields rather than treating all rooms as interchangeable. |
+| [Background studies](background-studies) | 102 complete empty-room and matching setting originals | Identify exact camera, furniture, light, props and registration before pairing. An empty reading region in a character scene does not make it a background plate. |
+| [Character studies](character-studies) | Five distinct seated Sakiko figure originals, including writing, book and back-facing poses | Compare a figure with its compatible full scene before layering. An isolated figure does not establish the seat, writing surface, support or shadow. Preserve each original framing. |
+| [Portrait studies](portrait-studies) | Twelve original portrait alternatives and exact avatar studies | Read the complete passport, retain the particular original framing and inspect actual small-display optical quality before adoption. A room-framed crop does not satisfy the later independent close-up method. |
+| [Companion forms](companion-forms) | Thirteen original horizontal cat forms, right-facing alternatives and historical sleeping/loaf studies | Read the formation history and character passport before stage 01/06/10 work. Vertical docking uses the same eligible horizontal artwork rotated ninety degrees, with the whole body and tail together; do not introduce separately drawn upright cats. |
+| [Surfaces and atmosphere](surfaces-and-atmosphere) | Twelve desk surfaces, courtyard/bench light fields and reading-alcove atmosphere studies | Compare the whole light field, blank content space and optical weight during stages 06–08. An atmospheric illustration is a fictional setting, not a navigation dataset or current weather report. |
+| [Production components](production-components) | Forty-eight original-canvas numerical masks, figure-role resources, shadow data and coupled residuals | Read each exact role and condition before stage 06 layer work. A full-color figure-role file may still contain the complete room; a residual is not a usable figure, identity source or generation reference. |
+| [Brand study](brand-studies) | One unchanged original vector doorway mark | Compare its complete viewBox and actual small-size composition during a later authorized identity review. Keeping the study does not adopt a new application mark. |
+| [Static registrations](registrations) | Sixteen exact-canvas geometry records with actual relative resources | Use the original camera, seat, floor, contact and safe-text relationships. A registration preserves geometry; it does not certify layer quality, runtime use or motion. |
+| [Design intentions and production lessons](design-intents/README.md) | Independent interface goals and craft lessons preserved as English text | Read with the complete material body and eligible related files. No omitted image becomes a reference or generation input through its textual lesson. |
+
+Read the [visual working materials](../../docs/materials/visual/README.md), [presence system](../../docs/design/PRESENCE_SYSTEM.md), [motion pipeline](../../docs/design/CHARACTER_MOTION_PIPELINE.md), and [roadmap](../../docs/DEVELOPMENT_ROADMAP.md) for the relevant work. The [coverage inventory](../coverage.json) describes the current application; this library also preserves unused alternatives that must not be silently counted as current coverage.
+
+The [work sequence](../../docs/development/WORK_SEQUENCE.md) groups substantial work and its materials. Choose the current work first, then its character and scene family; do not feed the entire collection into every session.
+
+Character sets and the first complete performance remain unfinished. Choose, redesign, separate and integrate the relevant artwork as the work proceeds. Read the whole composition before deciding to replace it; a newer draft does not invalidate a kept original.
+
+Character likenesses are unofficial fan art. Keep original attribution and resource-specific provenance with the artwork.

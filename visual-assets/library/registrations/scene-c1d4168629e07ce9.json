@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "id": "sakiko-chat-apricot-room4",
+  "character": "sakiko",
+  "activity": "chat",
+  "light": "morning",
+  "palette": "apricot",
+  "width": 1536,
+  "height": 1024,
+  "mother": "../room-studies/sakiko-chat-apricot-mother.png",
+  "background": "../room-studies/room-study-0031-df123979646a.png",
+  "figure": "../production-components/production-component-0032-45a4eea88210.png",
+  "mask": "../production-components/production-component-0033-0f88304377b3.png",
+  "shadow": "../production-components/production-component-0034-ce670e614333.png",
+  "seat": [
+    0.842,
+    0.58
+  ],
+  "ground": [
+    0.767,
+    0.761
+  ],
+  "bodyBounds": [
+    0.7259114583333334,
+    0.2509765625,
+    0.9322916666666666,
+    0.767578125
+  ],
+  "safeTextBoundary": 0.64,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "separate"
+  },
+  "contourComplete": true,
+  "hitPolygon": "81% 25%, 85% 25%, 88% 34%, 90% 44%, 91% 55%, 93% 57%, 93% 59%, 87% 60%, 82% 61%, 81% 73%, 79% 77%, 73% 76%, 73% 73%, 75% 60%, 76% 49%, 78% 36%, 79% 27%",
+  "travel": 0.008,
+  "slope": 0.09,
+  "perspective": 0,
+  "environmentVariant": "clear-day",
+  "preservationScope": "Exact-canvas static design registration. Its presence grants no new layer, runtime, motion or generation-input approval.",
+  "historicalSceneRecordSha256": "c1d4168629e07ce96c95ff42725974907b31d34d01c69e301cd9a4f59e96011b",
+  "componentsNotIncluded": []
+}
