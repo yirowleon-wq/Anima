@@ -1,0 +1,19 @@
+{
+  "template_only": true,
+  "record_type": "claim",
+  "claim_id": "__UNSET__",
+  "feature_id": null,
+  "property": null,
+  "candidates": [],
+  "decision": "unresolved",
+  "adopted_value": null,
+  "adopted_source_refs": [],
+  "source_locator": null,
+  "rejected_candidates_with_reasons": [],
+  "confidence": "E0",
+  "uncertainty": null,
+  "conflict_group": null,
+  "reason": null,
+  "reviewer": null,
+  "reviewed_at": null
+}

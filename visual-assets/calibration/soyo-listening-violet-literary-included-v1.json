@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "scene": "soyo-listening-violet-literary-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "99ebaaa7158f9cf12c3308fa4fa0231e136b51ad6a81add4693159fb2a103ccb",
+    "background": "8b34b7661386796db687eb8d35ca4d44da0fc1cf98fd9159ff8daacbad8111ea",
+    "F": "ff3ec4d3b9c86842f5f4d240294b185bfb2dd112773008547196e229eba5311e",
+    "S": "ff46e988ff55593df734ba040ee2fde7aa846b830e2dae13b2e30bf8c7206fb6"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        733,
+        114,
+        1259,
+        909
+      ],
+      "normalized": [
+        0.4772135416666667,
+        0.111328125,
+        0.8196614583333334,
+        0.8876953125
+      ],
+      "basis": "Read-only MAX(L(F),L(S)) >32 envelope; includes actual local receiver material and soft shoe grounding."
+    }
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

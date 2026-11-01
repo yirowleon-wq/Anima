@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "scene": "taki-attention-violet-literary-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "322e2e43b3a93587098bf35f0a36d314d0cd4f23a541782353c2e9bc20cb2a26",
+    "background": "2c37a339857b1a85db2d9a0752c68989a1dd788e3a872669dcb13f0f157ae951",
+    "F": "fe8b6621f72244255d9a65401e903bc07cdb6de9b2b73e75dd82b8c00a479bd4",
+    "S": "1d0f60ca08f8a65d8743192d3788b438ba17893c9db328f591dd8e66f8da6b8d"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        851,
+        100,
+        1309,
+        911
+      ],
+      "normalized": [
+        0.5540364583333334,
+        0.09765625,
+        0.8522135416666666,
+        0.8896484375
+      ],
+      "basis": "sRGB Rec.709 luminance; F >32 and MAX(L(F),L(S)) >32 for envelope metadata only. Original continuous mask PNG bytes and runtime luminance remain unchanged."
+    },
+    "newUnionFitsInsideExistingFamilyEnvelope": true,
+    "familyFramingUnchanged": true
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

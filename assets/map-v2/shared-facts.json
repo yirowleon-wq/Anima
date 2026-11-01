@@ -1,0 +1,11 @@
+{
+  "version": "anima-synthetic-campus-v1",
+  "synthetic": true,
+  "legacyPlaceRedirects": {
+    "demo-library": "place/library"
+  },
+  "officialToCanonical": {},
+  "originalLocatorReferences": {},
+  "venues": [],
+  "fidelityObservations": {}
+}

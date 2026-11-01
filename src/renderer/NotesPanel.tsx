@@ -1,0 +1,1440 @@
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import {
+  Check,
+  BookOpen,
+  ChevronLeft,
+  ChevronDown,
+  ChevronRight,
+  History,
+  FileText,
+  MessageCircle,
+  MoreHorizontal,
+  Plus,
+  RotateCcw,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react';
+import {
+  NOTE_LIMITS,
+  noteQuoteAddress,
+  type NoteDocument,
+  type NoteHistory,
+  type NoteList,
+  type NoteMutation,
+  type NoteQuote,
+  type NoteQuoteReference,
+  type NotesBridge,
+  type NoteDraftAddress,
+  type NoteSummary,
+} from '../shared/notes';
+import { IconButton, PagePanel, uiError } from './ui';
+import { DEFAULT_TIME_ZONE, formatDateTime } from './time';
+import type { LocalSearchLocator } from '../shared/search';
+import { materialQuoteAddress, type MaterialQuoteReference } from '../shared/materials';
+import { readBookmarkTransfer, useBookmarkTray, writeBookmarkTransfer } from './SourceBookmarkTray';
+import { SOURCE_BOOKMARK_MIME, sourceBookmarkReferenceSchema, type ConversationBookmarkReference, type SourceBookmarkPreview, type SourceBookmarkReference } from '../shared/source-bookmark';
+import type { NoteReturnAddress } from './workspace-return';
+import './notes.css';
+import './keep-note-actions.css';
+
+type Editor = { note?: NoteDocument; title: string; body: string };
+type NoteSelection = { editor: Editor; start: number; end: number; left: number; top: number };
+const fresh = (): Editor => ({ title: '', body: '' });
+const keyOf = (editor: Editor) => editor.note?.id || 'new';
+const isDirty = (editor?: Editor) =>
+  !!editor &&
+  (editor.note
+    ? editor.title !== editor.note.title || editor.body !== editor.note.body
+    : !!editor.title || !!editor.body);
+const editable = (note: NoteDocument): Editor => ({
+  note,
+  title: note.title,
+  body: note.body,
+});
+const referenceNoteTitle = 'Source excerpt';
+const ownNoteLabel = (note: Pick<NoteDocument, 'title' | 'source'>) =>
+  note.source.referenceOnly && note.title === referenceNoteTitle ? 'Excerpt note' : note.title || 'Untitled page';
+function noteSourceReference(note?: Pick<NoteDocument, 'source'>): SourceBookmarkReference | undefined {
+  if (!note?.source.referenceOnly) return;
+  const { material, notebook, conversation } = note.source;
+  return material ? { kind: 'material', reference: materialQuoteAddress(material) } : notebook ? { kind: 'notebook', reference: notebook }
+    : conversation ? { kind: 'conversation', reference: conversation } : undefined;
+}
+/** A visible source label is a fresh owner projection, never a saved title or
+ * a cache used to recreate words withdrawn from the original. */
+function KeptNoteEntry({ note, active, boundary, busy, current, hasDraft, date, onOpen }: {
+  note: NoteSummary; active: boolean; boundary: string; busy: boolean; current: boolean; hasDraft: boolean;
+  date: string; onOpen: () => void;
+}) {
+  const button = useRef<HTMLButtonElement>(null), generation = useRef(0);
+  const [visible, setVisible] = useState(false);
+  const [loaded, setLoaded] = useState<{ key: string; value: SourceBookmarkPreview }>();
+  const [unavailable, setUnavailable] = useState(false);
+  const address = noteSourceReference(note), addressKey = JSON.stringify(address);
+  const key = `${boundary}:${note.id}@${note.revision}:${note.sha256}:${note.state}`;
+  const preview = active && note.state === 'active' && loaded?.key === key ? loaded.value : undefined;
+  useEffect(() => {
+    if (!active || !button.current) return;
+    if (typeof IntersectionObserver === 'undefined') { setVisible(true); return; }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    });
+    observer.observe(button.current); return () => observer.disconnect();
+  }, [active, note.id]);
+  useEffect(() => {
+    const request = ++generation.current; setLoaded(undefined); setUnavailable(false);
+    if (!active || !visible || note.state !== 'active' || !address) return;
+    void window.anima.sourceBookmarkPreview(address).then(value => {
+      if (generation.current === request) setLoaded({ key, value });
+    }).catch(() => { if (generation.current === request) setUnavailable(true); });
+    return () => { generation.current++; };
+  }, [active, visible, key, addressKey]);
+  const ownTitle = note.title && (!note.source.referenceOnly || note.title !== referenceNoteTitle) ? note.title : undefined;
+  const sourceName = preview ? `${preview.title}${preview.page ? ` · p. ${preview.page}` : ''}`
+    : note.source.material ? `Material excerpt${note.source.material.page ? ` · p. ${note.source.material.page}` : ''}`
+      : note.source.conversation ? 'Conversation excerpt' : 'Note excerpt';
+  return <button ref={button} className={`notes-entry ${current ? 'is-current' : ''}`} disabled={busy}
+    onClick={onOpen} aria-current={current ? 'true' : undefined} onFocus={() => setVisible(true)} onMouseEnter={() => setVisible(true)}>
+    <strong>{ownTitle || (note.source.referenceOnly ? sourceName : 'Untitled page')}</strong>
+    {note.preview && <span className="notes-preview">{note.preview}</span>}
+    {preview && <span className="notes-preview notes-source-preview">{Array.from(preview.text).slice(0, 140).join('')}</span>}
+    {!preview && unavailable && <small>The original text cannot be opened right now. Your thoughts are preserved.</small>}
+    <small>{hasDraft ? 'Unfinished writing remains' : date}</small>
+  </button>;
+}
+
+function noteTextPosition(control: HTMLTextAreaElement, start: number, end: number) {
+    // Measure the real editor's wrapped text. The mirror is only geometry;
+    // original text and Unicode source coordinates still belong to the note.
+    const style = window.getComputedStyle(control), mirror = document.createElement('div');
+    mirror.style.cssText = 'position:fixed;left:-100000px;top:0;visibility:hidden;white-space:pre-wrap;overflow-wrap:break-word;border:0;box-sizing:border-box;';
+    for (const property of ['font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'word-spacing', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'text-indent', 'tab-size']) mirror.style.setProperty(property, style.getPropertyValue(property));
+    mirror.style.width = `${control.clientWidth}px`;
+    mirror.append(document.createTextNode(control.value.slice(0, start)));
+    const mark = document.createElement('span');
+    mark.textContent = control.value.slice(start, end) || '\u200b';
+    mirror.append(mark); document.body.append(mirror);
+    const position = { top: mark.offsetTop, left: mark.offsetLeft };
+    mirror.remove();
+    return position;
+}
+function revealNoteMatch(control: HTMLInputElement | HTMLTextAreaElement, start: number, end: number) {
+  control.focus({ preventScroll: true });
+  control.setSelectionRange(start, end);
+  if (control instanceof HTMLTextAreaElement) {
+    control.scrollTop = Math.max(0, noteTextPosition(control, start, end).top - control.clientHeight / 2);
+  }
+  control.scrollIntoView({ block: 'nearest' });
+}
+
+function NotesFrame({
+  embedded,
+  onClose,
+  children,
+}: {
+  embedded: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return embedded ? (
+    <section className="notes-page notes-embedded" aria-label="Notes">
+      <div className="notes-content">
+        <h2 className="sr-only" data-notes-focus tabIndex={-1}>
+          Notes
+        </h2>
+        {children}
+      </div>
+    </section>
+  ) : (
+    <PagePanel title="Notes" onClose={onClose} className="notes-page">
+      {children}
+    </PagePanel>
+  );
+}
+
+/** A separate notebook. Saving here does not create memories or arrangements. */
+export function NotesPanel({
+  onClose,
+  onUnsavedChange,
+  onOpenMaterialSource,
+  onOpenMaterials,
+  onOpenConversationSource,
+  onReturnAddressChange,
+  resume,
+  onQuote,
+  discussion,
+  onCloseDiscussion,
+  quoteContext = '',
+  quoteBoundary = '',
+  quoteEnabled = true,
+  active = true,
+  refreshKey,
+  focus,
+  embedded = false,
+  bridge = window.anima as unknown as NotesBridge,
+  timeZone = DEFAULT_TIME_ZONE,
+}: {
+  onClose: () => void;
+  onUnsavedChange?: (unsaved: boolean) => void;
+  onOpenMaterialSource?: (source: MaterialQuoteReference, discuss?: boolean) => Promise<void>;
+  onOpenMaterials?: () => void;
+  onOpenConversationSource?: (reference: ConversationBookmarkReference) => Promise<void>;
+  onReturnAddressChange?: (address: NoteReturnAddress | undefined) => void;
+  resume?: { address: NoteReturnAddress; requestId: number };
+  onQuote?: (quote: NoteQuote, stayHere?: boolean) => boolean;
+  /** The original conversation DOM, including its one composer and replies. */
+  discussion?: ReactNode;
+  onCloseDiscussion?: () => void;
+  quoteContext?: string;
+  quoteBoundary?: string;
+  quoteEnabled?: boolean;
+  active?: boolean;
+  refreshKey?: string | number;
+  focus?: { locator: Extract<LocalSearchLocator, { kind: 'note' }>; requestId: number };
+  embedded?: boolean;
+  bridge?: NotesBridge;
+  timeZone?: string;
+}) {
+  const bookmarkTray = useBookmarkTray();
+  const panelId = useId();
+  const [indexOpen, setIndexOpen] = useState(!resume && !focus);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const indexButton = useRef<HTMLButtonElement>(null), indexSearch = useRef<HTMLInputElement>(null);
+  const menuButton = useRef<HTMLButtonElement>(null), objectMenu = useRef<HTMLDivElement>(null);
+  const [list, setList] = useState<NoteList>({
+    items: [],
+    total: 0,
+    offset: 0,
+    hasMore: false,
+  });
+  const [query, setQuery] = useState(''),
+    [appliedQuery, setAppliedQuery] = useState('');
+  const [state, setState] = useState<'active' | 'deleted'>('active');
+  const [editor, setEditor] = useState<Editor>(),
+    [conflict, setConflict] = useState<NoteDocument>();
+  const [loading, setLoading] = useState(false),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState('');
+  const [receipt, setReceiptValue] = useState(''),
+    [undoRevision, setUndoRevision] = useState<number>();
+  const [receiptKind, setReceiptKind] = useState<'notice' | 'saved'>('notice');
+  function setReceipt(value: string, kind: 'notice' | 'saved' = 'notice') { setReceiptValue(value); setReceiptKind(kind); }
+  const [history, setHistory] = useState<NoteHistory>(),
+    [version, setVersion] = useState<NoteDocument>();
+  const [closing, setClosing] = useState(false),
+    [draftCount, setDraftCount] = useState(0);
+  const [sourceError, setSourceError] = useState(''), [sourceOpening, setSourceOpening] = useState(false);
+  const [loadedExcerpt, setLoadedExcerpt] = useState<{ key: string; value: SourceBookmarkPreview }>(), [excerptLoading, setExcerptLoading] = useState(false),
+    [excerptError, setExcerptError] = useState(''), [excerptRefresh, setExcerptRefresh] = useState(0);
+  const excerptGeneration = useRef(0);
+  const [selection, setSelection] = useState<NoteSelection>();
+  const [quoting, setQuoting] = useState(false);
+  const [discussionPane, setDiscussionPane] = useState<'note' | 'chat'>('chat');
+  useEffect(() => { if (discussion) setDiscussionPane('chat'); }, [!!discussion]);
+  useEffect(() => { if (resume?.address.discussion) setDiscussionPane(resume.address.discussion); }, [resume?.requestId]);
+  const quoteGeneration = useRef(0), bookmarkDrag = useRef<SourceBookmarkReference | undefined>(undefined);
+  const quoteDestination = useRef({ context: quoteContext, boundary: quoteBoundary, enabled: quoteEnabled, active, focus });
+  quoteDestination.current = { context: quoteContext, boundary: quoteBoundary, enabled: quoteEnabled, active, focus };
+  const returnSelection = useRef<{ address: NoteQuoteReference; boundary: string;
+    scrollTop: number; pageTop: number; width: number; height: number } | undefined>(undefined);
+  const [selectionRestoreRequest, requestSelectionRestore] = useState(0);
+  const pendingDiscussionRestore = useRef(false);
+  const closingDiscussion = useRef(false);
+  const drafts = useRef(new Map<string, Editor>()),
+    request = useRef(0),
+    listRequest = useRef(0),
+    mounted = useRef(true);
+  const savedDrafts = useRef(new Map<string, NoteDraftAddress>()), draftEpoch = useRef<number | undefined>(undefined);
+  const draftQueues = useRef(new Map<string, Promise<void>>()), draftTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const queuedDrafts = useRef(new Map<string, { value: Editor; boundary: string; epoch?: number }>()), draftConflicts = useRef(new Set<string>());
+  const draftContext = useRef(quoteBoundary); draftContext.current = quoteBoundary;
+  const [recentDraft, setRecentDraft] = useState<string>();
+  const backedDrafts = useRef(new Map<string, Editor>());
+  const [draftBackupRevision, bumpDraftBackup] = useState(0);
+  const host = useRef<HTMLDivElement>(null);
+  const escapeKey = useRef<((event: KeyboardEvent) => void) | undefined>(undefined);
+  const focusRequest = useRef(0), focusPending = useRef<typeof focus>(undefined);
+  const unsavedCallback = useRef(onUnsavedChange);
+  unsavedCallback.current = onUnsavedChange;
+  const dirty = isDirty(editor),
+    deleted = editor?.note?.state === 'deleted';
+  const excerptKey = `${quoteBoundary}:${editor?.note?.id || ''}@${editor?.note?.revision || 0}`;
+  const sourceExcerpt = active && !deleted && loadedExcerpt?.key === excerptKey ? loadedExcerpt.value : undefined;
+  const returnCallback = useRef(onReturnAddressChange); returnCallback.current = onReturnAddressChange;
+  const resumeRequest = useRef(0), resumeAddress = useRef<NoteReturnAddress | undefined>(undefined);
+  const editorCurrent = useRef(editor); editorCurrent.current = editor;
+  const viewingGeneration = useRef(0);
+  useEffect(() => {
+    // The conversation is portalled here physically, while its React parent
+    // remains App. Listen after local React controls and before window fallback.
+    const key = (event: KeyboardEvent) => escapeKey.current?.(event);
+    document.addEventListener('keydown', key);
+    return () => document.removeEventListener('keydown', key);
+  }, []);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const frame = requestAnimationFrame(() => objectMenu.current?.querySelector<HTMLButtonElement>('button')?.focus());
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !objectMenu.current?.contains(event.target) && !menuButton.current?.contains(event.target)) setMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', outside, true);
+    return () => { cancelAnimationFrame(frame); document.removeEventListener('pointerdown', outside, true); };
+  }, [menuOpen]);
+  useEffect(() => { if (!active) setMenuOpen(false); }, [active]);
+  useEffect(() => { if (history || conflict) setIndexOpen(false); }, [history, conflict]);
+  useEffect(() => {
+    if (!active || busy || !pendingDiscussionRestore.current) return;
+    pendingDiscussionRestore.current = false;
+    requestSelectionRestore(value => value + 1);
+  }, [active, busy]);
+  const [resumeProof, setResumeProof] = useState(0);
+  const reportReturnAddress = (includeSelection = true) => {
+    if (!active || !editor || deleted || resumeAddress.current || resume && resumeRequest.current !== resume.requestId) return;
+    const control = host.current?.querySelector<HTMLTextAreaElement>('textarea.notes-body'),
+      page = host.current?.querySelector<HTMLElement>('.notes-embedded, .page-panel');
+    returnCallback.current?.({ id: editor.note?.id || 'new',
+      ...(editor.note ? { revision: editor.note.revision, sha256: editor.note.sha256 } : {}),
+      ...(discussion ? { discussion: discussionPane } : {}),
+      ...(includeSelection && !dirty && editor.note && selection?.editor === editor ? { selection: {
+        id: editor.note.id, revision: editor.note.revision, sha256: editor.note.sha256, start: selection.start, end: selection.end } } : {}),
+      scrollTop: control?.scrollTop || 0, pageTop: page?.scrollTop || 0 });
+  };
+  useEffect(() => { reportReturnAddress(); }, [active, editor, selection, dirty, deleted, !!discussion, discussionPane]);
+  useEffect(() => {
+    if (!active || !resume || busy || resumeRequest.current === resume.requestId) return;
+    resumeRequest.current = resume.requestId; resumeAddress.current = resume.address;
+    setResumeProof(0); const requestId = resume.requestId;
+    void (resume.address.id === 'new' ? newNote() : open(resume.address.id)).then(success => {
+      if (success && resumeRequest.current === requestId) setResumeProof(requestId);
+      else if (resumeRequest.current === requestId) resumeAddress.current = undefined;
+    });
+  }, [active, resume?.requestId, busy]);
+  useEffect(() => {
+    const address = resumeAddress.current;
+    if (!active || busy || !address || !editor || resumeProof !== resumeRequest.current || (editor.note?.id || 'new') !== address.id) return;
+    resumeAddress.current = undefined;
+    const requestId = resumeRequest.current, context = quoteBoundary, currentEditor = editor, viewing = viewingGeneration.current;
+    requestAnimationFrame(() => {
+      if (!mounted.current || !quoteDestination.current.active || quoteDestination.current.boundary !== context
+        || resumeRequest.current !== requestId || editorCurrent.current !== currentEditor || viewingGeneration.current !== viewing) return;
+      const control = host.current?.querySelector<HTMLTextAreaElement>('textarea.notes-body'),
+        page = host.current?.querySelector<HTMLElement>('.notes-embedded, .page-panel');
+      if (control) control.scrollTop = address.scrollTop || 0;
+      if (page) page.scrollTop = address.pageTop || 0;
+      if (!address.selection || dirty || conflict || !editor.note || editor.note.revision !== address.revision
+        || editor.note.sha256 !== address.sha256 || !control) { control?.focus({ preventScroll: true }); reportReturnAddress(); return; }
+      const points = Array.from(editor.body), start = points.slice(0, address.selection.start).join('').length,
+        end = points.slice(0, address.selection.end).join('').length;
+      if (address.selection.end > points.length) { control.focus({ preventScroll: true }); reportReturnAddress(); return; }
+      revealNoteMatch(control, start, end);
+      selectPassage(control);
+      reportReturnAddress();
+    });
+  }, [active, busy, editor, resumeProof]);
+  useEffect(() => {
+    const turn = ++excerptGeneration.current, reference = noteSourceReference(editor?.note);
+    setLoadedExcerpt(undefined); setExcerptError(''); setExcerptLoading(false);
+    if (!active || deleted || !reference) return;
+    setExcerptLoading(true);
+    void window.anima.sourceBookmarkPreview(reference).then(value => {
+      if (turn === excerptGeneration.current) setLoadedExcerpt({ key: excerptKey, value });
+    }).catch(cause => { if (turn === excerptGeneration.current) setExcerptError(uiError(cause)); })
+      .finally(() => { if (turn === excerptGeneration.current) setExcerptLoading(false); });
+    return () => { excerptGeneration.current++; };
+  }, [active, editor?.note?.id, editor?.note?.revision, deleted, quoteBoundary, excerptRefresh]);
+  const updateDraftCount = () => {
+    const keys = new Set([...savedDrafts.current.keys(), ...drafts.current.keys()]);
+    setDraftCount(keys.size); setRecentDraft(keys.values().next().value);
+  };
+  const queueDraftWrite = (key: string, value: Editor | undefined,
+    context = draftContext.current, epochAtQueue = draftEpoch.current) => {
+    const previous = draftQueues.current.get(key) || Promise.resolve();
+    const task = previous.catch(() => undefined).then(async () => {
+      if (typeof bridge.notesDraft !== 'function' || draftContext.current !== context) return;
+      if (value && draftConflicts.current.has(key)) return;
+      let known = savedDrafts.current.get(key), epoch = epochAtQueue;
+      if (epoch === undefined) {
+        const result = await bridge.notesDraft({ operation: 'read', key });
+        if (draftContext.current !== context) return;
+        epoch = result.epoch; draftEpoch.current = result.epoch;
+        if (result.draft) { known = result.draft; savedDrafts.current.set(key, result.draft); }
+      }
+      const result = value ? await bridge.notesDraft({ operation: 'write', key, expectedEpoch: epoch,
+        expectedDraftRevision: known?.revision || 0, ...(value.note ? { baseRevision: value.note.revision } : {}), title: value.title, body: value.body })
+        : known ? await bridge.notesDraft({ operation: 'discard', key, expectedEpoch: epoch,
+          expectedDraftRevision: known.revision }) : undefined;
+      if (!result || draftContext.current !== context) return;
+      if (result.status === 'conflict') {
+        draftConflicts.current.add(key);
+        if (mounted.current) setError('This page was edited elsewhere too. Your writing is preserved; compare both versions before choosing one to save.');
+        return;
+      }
+      if (result.draft) savedDrafts.current.set(key, result.draft);
+      else savedDrafts.current.delete(key);
+      if (value) backedDrafts.current.set(key, value); else backedDrafts.current.delete(key);
+      draftConflicts.current.delete(key);
+      if (mounted.current) { updateDraftCount(); bumpDraftBackup(value => value + 1); }
+    }).catch(cause => { if (mounted.current && draftContext.current === context) setError(uiError(cause)); });
+    draftQueues.current.set(key, task); return task;
+  };
+  const flushDraft = (key: string) => {
+    const timer = draftTimers.current.get(key); if (timer) clearTimeout(timer); draftTimers.current.delete(key);
+    const queued = queuedDrafts.current.get(key); queuedDrafts.current.delete(key);
+    return queued ? queueDraftWrite(key, queued.value, queued.boundary, queued.epoch) : draftQueues.current.get(key);
+  };
+  const scheduleDraft = (value: Editor) => {
+    const key = keyOf(value), timer = draftTimers.current.get(key);
+    if (timer) clearTimeout(timer);
+    queuedDrafts.current.set(key, { value, boundary: draftContext.current, epoch: draftEpoch.current });
+    draftTimers.current.set(key, setTimeout(() => void flushDraft(key), 250));
+  };
+  const discardDraft = (key: string) => {
+    const timer = draftTimers.current.get(key); if (timer) clearTimeout(timer); draftTimers.current.delete(key);
+    queuedDrafts.current.delete(key);
+    return queueDraftWrite(key, undefined);
+  };
+  useEffect(() => {
+    if (!active || typeof bridge.notesDraft !== 'function') return;
+    let live = true;
+    void bridge.notesDraft({ operation: 'list' }).then(result => {
+      if (!live) return;
+      if (draftEpoch.current !== undefined && draftEpoch.current !== result.epoch) {
+        drafts.current.clear(); draftConflicts.current.clear(); backedDrafts.current.clear();
+      }
+      draftEpoch.current = result.epoch;
+      savedDrafts.current = new Map((result.items || []).map(value => [value.key, value])); updateDraftCount();
+    }).catch(cause => { if (live) setError(uiError(cause)); });
+    return () => { live = false; for (const key of queuedDrafts.current.keys()) void flushDraft(key); };
+  }, [active, quoteBoundary, bridge]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      releaseBookmarkDrag();
+      request.current++;
+      listRequest.current++;
+      // A restarted mount must retry navigation whose read was just invalidated.
+      // In StrictMode the refs survive the cleanup, unlike the pending read.
+      focusRequest.current = 0;
+      resumeRequest.current = 0;
+      resumeAddress.current = undefined;
+      focusPending.current = undefined;
+    };
+  }, []);
+  useEffect(() => {
+    if (active)
+      host.current
+        ?.querySelector<HTMLHeadingElement>('h1, [data-notes-focus]')
+        ?.focus({ preventScroll: true });
+  }, [active]);
+  useEffect(() => {
+    onUnsavedChange?.(typeof bridge.notesDraft === 'function'
+      ? [...drafts.current].some(([key, draft]) => backedDrafts.current.get(key) !== draft)
+        || !!editor && dirty && backedDrafts.current.get(keyOf(editor)) !== editor
+      : dirty || draftCount > 0);
+  }, [dirty, draftCount, editor, draftBackupRevision, onUnsavedChange]);
+  useEffect(() => () => unsavedCallback.current?.(false), []);
+  useEffect(() => {
+    quoteGeneration.current++;
+    releaseBookmarkDrag();
+    setSelection(undefined);
+    setQuoting(false);
+  }, [active, quoteContext]);
+  useEffect(() => { setSelection(undefined); }, [editor]);
+  useEffect(() => { returnSelection.current = undefined; }, [quoteBoundary]);
+  useEffect(() => {
+    if (!selection) return;
+    const dismiss = () => setSelection(undefined);
+    window.addEventListener('resize', dismiss);
+    return () => window.removeEventListener('resize', dismiss);
+  }, [!!selection]);
+  useEffect(() => {
+    if (closing)
+      host.current
+        ?.querySelector<HTMLElement>('.notes-leave')
+        ?.scrollIntoView({ block: 'nearest' });
+  }, [closing]);
+  useEffect(() => {
+    if (history || conflict) {
+      host.current?.querySelector<HTMLElement>('.notes-side')?.scrollIntoView({ block: 'nearest' });
+    }
+  }, [!!history, !!conflict]);
+
+  async function loadList(nextState = state, search = appliedQuery, append = false) {
+    const token = ++listRequest.current;
+    setLoading(true);
+    try {
+      const result = await bridge.notesList({
+        state: nextState,
+        query: search,
+        offset: append ? list.items.length : 0,
+      });
+      if (!mounted.current || token !== listRequest.current) return;
+      setList((current) =>
+        append ? { ...result, items: [...current.items, ...result.items] } : result,
+      );
+    } catch (cause) {
+      if (mounted.current && token === listRequest.current) setError(uiError(cause));
+    } finally {
+      if (mounted.current && token === listRequest.current) setLoading(false);
+    }
+  }
+  useEffect(() => {
+    if (active) void loadList();
+  }, [state, appliedQuery, active, refreshKey]);
+  useEffect(() => {
+    if (!active || !focus || busy || focusRequest.current === focus.requestId) return;
+    focusRequest.current = focus.requestId;
+    focusPending.current = focus;
+    const requestId = focus.requestId, context = quoteBoundary;
+    setState('active'); setQuery(''); setAppliedQuery('');
+    void open(focus.locator.noteId).then(success => {
+      // A bookmark can create a page while this already-active notebook is
+      // open. Refresh its real owner list as well as opening the new editor.
+      if (success && focusRequest.current === requestId && quoteDestination.current.active
+        && quoteDestination.current.boundary === context) void loadList('active', '');
+    });
+  }, [active, focus, busy]);
+  useEffect(() => {
+    const pending = focusPending.current;
+    if (!active || busy || !pending || editor?.note?.id !== pending.locator.noteId) return;
+    focusPending.current = undefined;
+    if (isDirty(editor)) { setReceipt('Your latest writing is preserved. Continue with this version first.'); return; }
+    if (editor.note.revision !== pending.locator.revision) { setReceipt('This page has been edited. This is its current content.'); return; }
+    const field = pending.locator.field === 'title' ? 'input.notes-title' : 'textarea.notes-body';
+    const control = host.current?.querySelector<HTMLInputElement | HTMLTextAreaElement>(field);
+    if (!control) return;
+    const text = pending.locator.field === 'title' ? editor.title : editor.body;
+    const points = Array.from(text);
+    const start = points.slice(0, pending.locator.offset).join('').length;
+    const end = points.slice(0, pending.locator.end).join('').length;
+    revealNoteMatch(control, start, end);
+  }, [editor, active, busy]);
+  useEffect(() => {
+    if (!active || busy || !editor?.note || isDirty(editor) || focusPending.current) return;
+    const id = editor.note.id,
+      revision = editor.note.revision,
+      token = ++request.current;
+    const currentEditor = editor, explicitDiscussionReturn = closingDiscussion.current;
+    closingDiscussion.current = false;
+    const activationFocus = document.activeElement, activationViewing = viewingGeneration.current,
+      activationInteraction = bookmarkTray?.getInteractionVersion();
+    setBusy(true);
+    void readAll(id)
+      .then((note) => {
+        if (!mounted.current || token !== request.current) return;
+        if (note.revision !== revision) {
+          setEditor(editable(note));
+          resetFeedback();
+          return;
+        }
+        const resume = returnSelection.current, destination = quoteDestination.current;
+        if (!resume || !destination.active) return;
+        if (pendingDiscussionRestore.current && !explicitDiscussionReturn) return;
+        const currentFocus = document.activeElement;
+        const retiredDiscussionFocus = explicitDiscussionReturn && (currentFocus === document.body
+          || currentFocus instanceof HTMLElement && !currentFocus.getClientRects().length
+            && !!currentFocus.closest('.notes-discussion,.conversation-workspace-host'));
+        if (resume.boundary !== destination.boundary
+          || destination.focus && destination.focus.requestId !== focusRequest.current || focusPending.current
+          || note.state !== 'active' || note.id !== resume.address.id || note.revision !== resume.address.revision
+          || note.sha256 !== resume.address.sha256 || editorCurrent.current !== currentEditor || isDirty(editorCurrent.current)
+          || currentFocus !== activationFocus && !retiredDiscussionFocus
+          || activationViewing !== viewingGeneration.current || activationInteraction !== bookmarkTray?.getInteractionVersion()) {
+          returnSelection.current = undefined;
+          return;
+        }
+        // The existing owner read qualified the same saved document. Restore
+        // its native editor range once; no copied body or durable focus exists.
+        const control = host.current?.querySelector<HTMLTextAreaElement>('textarea.notes-body');
+        if (!control || control.value !== note.body) return;
+        returnSelection.current = undefined;
+        const points = Array.from(note.body);
+        const start = points.slice(0, resume.address.start).join('').length,
+          end = points.slice(0, resume.address.end).join('').length;
+        revealNoteMatch(control, start, end);
+        const page = host.current?.querySelector<HTMLElement>('.notes-embedded, .page-panel');
+        if (control.clientWidth === resume.width && control.clientHeight === resume.height) {
+          control.scrollTop = resume.scrollTop;
+          if (page) page.scrollTop = resume.pageTop;
+        } else if (page) {
+          const line = noteTextPosition(control, start, end);
+          page.scrollTop += control.getBoundingClientRect().top - page.getBoundingClientRect().top
+            + line.top - control.scrollTop - page.clientHeight * .35;
+        }
+      })
+      .catch((cause) => {
+        if (mounted.current && token === request.current) setError(uiError(cause));
+      })
+      .finally(() => {
+        if (mounted.current && token === request.current) setBusy(false);
+      });
+  }, [active, selectionRestoreRequest]);
+
+  function retainDraft() {
+    if (editor && isDirty(editor)) { drafts.current.set(keyOf(editor), editor); scheduleDraft(editor); void flushDraft(keyOf(editor)); }
+    else if (editor) drafts.current.delete(keyOf(editor));
+    updateDraftCount();
+  }
+  function resetFeedback() {
+    cancelQuote();
+    setError('');
+    setReceipt('');
+    setConflict(undefined);
+    setUndoRevision(undefined);
+    setHistory(undefined);
+    setVersion(undefined);
+    setClosing(false);
+    setSourceError('');
+  }
+  async function readAll(id: string, revision?: number) {
+    const first = await bridge.notesRead({ id, revision });
+    let body = first.body,
+      page = first;
+    while (page.hasMore) {
+      page = await bridge.notesRead({
+        id,
+        revision: first.note.revision,
+        offset: page.end,
+      });
+      body += page.body;
+    }
+    return { ...first.note, body };
+  }
+  async function open(id: string, stillRequested: () => boolean = () => true) {
+    if (busy || !stillRequested()) return false;
+    retainDraft();
+    resetFeedback();
+    const token = ++request.current;
+    const draft = drafts.current.get(id);
+    setBusy(true);
+    try {
+      const note = await readAll(id);
+      if (!mounted.current || token !== request.current || !stillRequested()) return false;
+      const kept = !draft && note.state === 'active' && typeof bridge.notesDraft === 'function'
+        ? await bridge.notesDraft({ operation: 'read', key: id }) : undefined;
+      if (!mounted.current || token !== request.current || !stillRequested()) return false;
+      const original = kept?.draft?.baseRevision && kept.draft.baseRevision !== note.revision
+        ? await readAll(id, kept.draft.baseRevision) : note;
+      if (mounted.current && token === request.current && stillRequested()) {
+        if (kept) { draftEpoch.current = kept.epoch; if (kept.draft) savedDrafts.current.set(id, kept.draft); }
+        const resumed = note.state === 'active' ? draft || (kept?.draft ? { note: original,
+          title: kept.draft.title, body: kept.draft.body } : undefined) : undefined;
+        setEditor(resumed || editable(note));
+        if (resumed) { drafts.current.set(id, resumed); if (kept?.draft) backedDrafts.current.set(id, resumed);
+          if (resumed.note?.revision !== note.revision) setConflict(note); }
+        updateDraftCount();
+        return true;
+      }
+    } catch (cause) {
+      if (mounted.current && token === request.current && stillRequested()) setError(uiError(cause));
+    } finally {
+      if (mounted.current && token === request.current) setBusy(false);
+    }
+    return false;
+  }
+  async function newNote() {
+    if (busy) return false;
+    retainDraft();
+    resetFeedback();
+    const token = ++request.current;
+    setState('active');
+    const local = drafts.current.get('new');
+    if (local || typeof bridge.notesDraft !== 'function') { setEditor(local || fresh()); return true; }
+    setBusy(true);
+    try {
+      const kept = await bridge.notesDraft({ operation: 'read', key: 'new' });
+      if (!mounted.current || token !== request.current) return;
+      draftEpoch.current = kept.epoch;
+      if (kept.draft) { savedDrafts.current.set('new', kept.draft); const resumed = { title: kept.draft.title, body: kept.draft.body };
+        drafts.current.set('new', resumed); backedDrafts.current.set('new', resumed); setEditor(resumed); }
+      else setEditor(fresh());
+      updateDraftCount();
+      return true;
+    } catch (cause) { if (mounted.current && token === request.current) setError(uiError(cause)); }
+    finally { if (mounted.current && token === request.current) setBusy(false); }
+    return false;
+  }
+  function changeDraft(change: Partial<Pick<Editor, 'title' | 'body'>>) {
+    if (!editor) return;
+    cancelQuote();
+    const next = { ...editor, ...change };
+    setEditor(next);
+    setReceipt('');
+    setUndoRevision(undefined);
+    if (isDirty(next)) { drafts.current.set(keyOf(next), next); scheduleDraft(next); }
+    else { drafts.current.delete(keyOf(next)); void discardDraft(keyOf(next)); }
+    updateDraftCount();
+  }
+  function acceptResult(result: NoteMutation) {
+    if (result.status === 'conflict') {
+      setConflict(result.current);
+      return false;
+    }
+    if (editor) { drafts.current.delete(keyOf(editor)); void discardDraft(keyOf(editor)); }
+    updateDraftCount();
+    setEditor(editable(result.note));
+    setConflict(undefined);
+    setUndoRevision(result.previousRevision);
+    setVersion(undefined);
+    setHistory(undefined);
+    return true;
+  }
+  async function save(useCurrent = false) {
+    if (!editor || busy || deleted) return false;
+    setBusy(true);
+    setError('');
+    try {
+      const result = editor.note
+        ? await bridge.notesUpdate({
+            id: editor.note.id,
+            expectedRevision: useCurrent && conflict ? conflict.revision : editor.note.revision,
+            title: editor.title,
+            body: editor.body,
+          })
+        : await bridge.notesCreate({ title: editor.title, body: editor.body });
+      const saved = acceptResult(result);
+      if (saved) {
+        setReceipt('Saved', 'saved');
+        await loadList();
+      }
+      return saved && result.status === 'saved' ? result.note : undefined;
+    } catch (cause) {
+      setError(uiError(cause));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+  function selectPassage(control: HTMLTextAreaElement, point?: { x: number; y: number }) {
+    returnSelection.current = undefined;
+    if ((!onQuote && !bookmarkTray) || !active || !editor || deleted || busy || quoting || control.value !== editor.body) return;
+    const from = control.selectionStart, to = control.selectionEnd;
+    const text = control.value.slice(from, to);
+    if (!text.trim()) { setSelection(undefined); return; }
+    const start = Array.from(control.value.slice(0, from)).length, length = Array.from(text).length;
+    if (length > 4000) { setSelection(undefined); setReceipt('This passage is a little long. Select a shorter passage to discuss.'); return; }
+    const rect = control.getBoundingClientRect();
+    const position = point ? { left: point.x, top: point.y } : (() => {
+      const mark = noteTextPosition(control, from, to);
+      return { left: rect.left + mark.left - control.scrollLeft,
+        top: Math.max(rect.top, rect.top + mark.top - control.scrollTop) };
+    })();
+    setSelection({ editor, start, end: start + length,
+      left: Math.max(16, Math.min(window.innerWidth - 190, position.left)),
+      top: Math.max(84, Math.min(window.innerHeight - 64, position.top - 52)) });
+  }
+  function cancelQuote() {
+    quoteGeneration.current++;
+    returnSelection.current = undefined;
+    pendingDiscussionRestore.current = false;
+    closingDiscussion.current = false;
+    setSelection(undefined);
+    setQuoting(false);
+  }
+  function releaseBookmarkDrag() {
+    if (bookmarkDrag.current) bookmarkTray?.release(bookmarkDrag.current);
+    bookmarkDrag.current = undefined;
+  }
+  async function discussSelection() {
+    if (!selection || selection.editor !== editor || !onQuote || !quoteEnabled || busy || quoting || deleted || conflict) return;
+    const selected = selection, destination = quoteDestination.current, generation = ++quoteGeneration.current,
+      interaction = bookmarkTray?.getInteractionVersion();
+    const current = () => mounted.current && generation === quoteGeneration.current
+      && destination.context === quoteDestination.current.context && destination.boundary === quoteDestination.current.boundary
+      && quoteDestination.current.active && quoteDestination.current.enabled
+      && interaction === bookmarkTray?.getInteractionVersion();
+    setQuoting(true); setError('');
+    try {
+      // "Save and discuss" is one explicit user action. An unsaved edit must
+      // never be described by the earlier saved revision or material source.
+      const note = isDirty(editor) ? await save() : editor.note;
+      if (!note || !current()) return;
+      if (note.body !== selected.editor.body) throw new Error('This page has changed. Select the passage to discuss again.');
+      const quote = await bridge.notesQuote({ id: note.id, revision: note.revision, sha256: note.sha256,
+        start: selected.start, end: selected.end });
+      if (!current()) return;
+      const control = host.current?.querySelector<HTMLTextAreaElement>('textarea.notes-body');
+      const page = host.current?.querySelector<HTMLElement>('.notes-embedded, .page-panel');
+      const resume = control ? { address: noteQuoteAddress(quote), boundary: quoteDestination.current.boundary,
+        scrollTop: control.scrollTop, pageTop: page?.scrollTop || 0,
+        width: control.clientWidth, height: control.clientHeight } : undefined;
+      if (onQuote(quote, embedded && !!onCloseDiscussion)) { returnSelection.current = resume; setSelection(undefined); }
+    } catch (cause) { if (current()) setError(uiError(cause)); }
+    finally { if (mounted.current && generation === quoteGeneration.current) setQuoting(false); }
+  }
+  function closeDiscussion() {
+    const current = editorCurrent.current, interaction = bookmarkTray?.getInteractionVersion(), viewing = viewingGeneration.current;
+    closingDiscussion.current = true;
+    onCloseDiscussion?.();
+    setSelection(undefined);
+    if (current && isDirty(current)) {
+      returnSelection.current = undefined;
+      closingDiscussion.current = false;
+      requestAnimationFrame(() => {
+        if (quoteDestination.current.active && editorCurrent.current === current && viewingGeneration.current === viewing
+          && interaction === bookmarkTray?.getInteractionVersion()) host.current?.querySelector<HTMLTextAreaElement>('textarea.notes-body')?.focus({ preventScroll: true });
+      });
+      return;
+    }
+    // Reuse the same owner-qualified restoration as returning from chat.
+    // A pending note operation finishes first; hiding the discussion is immediate.
+    if (busy) pendingDiscussionRestore.current = true;
+    else requestSelectionRestore(value => value + 1);
+  }
+  function toggleIndex() {
+    setMenuOpen(false);
+    const next = !indexOpen;
+    setIndexOpen(next);
+    requestAnimationFrame(() => next ? indexSearch.current?.focus() : indexButton.current?.focus());
+  }
+  async function pickSelection() {
+    if (!selection || selection.editor !== editor || !bookmarkTray || busy || quoting || deleted || conflict) return;
+    const selected = selection, generation = ++quoteGeneration.current, destination = quoteDestination.current,
+      interaction = bookmarkTray.getInteractionVersion();
+    const current = () => mounted.current && generation === quoteGeneration.current
+      && destination.context === quoteDestination.current.context && destination.boundary === quoteDestination.current.boundary
+      && quoteDestination.current.active && destination.enabled === quoteDestination.current.enabled
+      && interaction === bookmarkTray.getInteractionVersion();
+    setQuoting(true); setError('');
+    try {
+      const note = isDirty(editor) ? await save() : editor.note;
+      if (!note || !current()) return;
+      if (note.body !== selected.editor.body) throw new Error('This page has changed. Select the passage to save again.');
+      const quote = await bridge.notesQuote({ id: note.id, revision: note.revision, sha256: note.sha256,
+        start: selected.start, end: selected.end });
+      if (!current()) return;
+      await bookmarkTray.note({ kind: 'notebook', reference: noteQuoteAddress(quote) },
+        host.current?.querySelector<HTMLTextAreaElement>('textarea.notes-body'));
+    } catch (cause) { if (current()) setError(uiError(cause)); }
+    finally { if (mounted.current && generation === quoteGeneration.current) setQuoting(false); }
+  }
+  async function openNotebookSource() {
+    const source = editor?.note?.source.notebook;
+    if (!source || sourceOpening || busy) return;
+    const destination = quoteDestination.current, interaction = bookmarkTray?.getInteractionVersion();
+    const current = () => mounted.current && quoteDestination.current.active
+      && destination.context === quoteDestination.current.context && destination.boundary === quoteDestination.current.boundary
+      && interaction === bookmarkTray?.getInteractionVersion();
+    setSourceOpening(true); setSourceError('');
+    try {
+      await bridge.notesQuote(source);
+      if (!current() || !await open(source.id, current)) return;
+      requestAnimationFrame(() => {
+        if (!current()) return;
+        const control = host.current?.querySelector<HTMLTextAreaElement>('textarea.notes-body');
+        const opened = editorCurrent.current;
+        if (!control || !opened?.note || opened.note.id !== source.id || control.value !== opened.body) return;
+        if (isDirty(opened)) {
+          setReceipt('Your latest writing is preserved. Continue with this version first.');
+          control.focus({ preventScroll: true });
+          return;
+        }
+        if (opened.note.state !== 'active' || opened.note.revision !== source.revision || opened.note.sha256 !== source.sha256) {
+          setReceipt(opened.note.state === 'deleted' ? 'This page was put away. The original sentence was not reselected.' : 'This page has been edited. This is its current content.');
+          control.focus({ preventScroll: true });
+          return;
+        }
+        const points = Array.from(control.value), start = points.slice(0, source.start).join('').length,
+          end = points.slice(0, source.end).join('').length;
+        revealNoteMatch(control, start, end);
+      });
+    } catch (cause) { if (current()) setSourceError(uiError(cause)); }
+    finally { if (mounted.current) setSourceOpening(false); }
+  }
+  async function recoverOriginalPage() {
+    if (!editor?.note || busy || sourceOpening) return;
+    const source = editor.note.source, destination = quoteDestination.current, interaction = bookmarkTray?.getInteractionVersion();
+    const current = () => mounted.current && quoteDestination.current.active
+      && destination.context === quoteDestination.current.context && destination.boundary === quoteDestination.current.boundary
+      && interaction === bookmarkTray?.getInteractionVersion();
+    // The user explicitly opens today's original page. The old quote address
+    // on this kept page is not rewritten to that newer version.
+    if (source.notebook) { await open(source.notebook.id, current); return; }
+    if (source.material && onOpenMaterials) {
+      retainDraft();
+      await Promise.allSettled([...queuedDrafts.current.keys()].map(key => flushDraft(key)));
+      if (current()) onOpenMaterials();
+    }
+  }
+  async function mutate(kind: 'state' | 'undo', target: 'active' | 'deleted' | number) {
+    if (!editor?.note || busy) return;
+    cancelQuote();
+    setBusy(true);
+    setError('');
+    try {
+      const input = {
+        id: editor.note.id,
+        expectedRevision: editor.note.revision,
+      };
+      const result =
+        kind === 'state'
+          ? await bridge.notesChangeState({
+              ...input,
+              state: target as 'active' | 'deleted',
+            })
+          : await bridge.notesUndo({
+              ...input,
+              targetRevision: target as number,
+            });
+      if (acceptResult(result)) {
+        setReceipt(
+          kind === 'undo'
+            ? 'This version was restored'
+            : target === 'deleted'
+              ? 'Put away here; restore it at any time'
+              : 'Note restored',
+        );
+        await loadList();
+      }
+    } catch (cause) {
+      setError(uiError(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function showHistory(append = false) {
+    if (!editor?.note || busy) return;
+    cancelQuote();
+    setBusy(true);
+    setError('');
+    try {
+      const result = await bridge.notesHistory({
+        id: editor.note.id,
+        offset: append ? history?.items.length || 0 : 0,
+      });
+      setHistory((current) =>
+        append && current ? { ...result, items: [...current.items, ...result.items] } : result,
+      );
+    } catch (cause) {
+      setError(uiError(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function viewVersion(revision: number) {
+    if (!editor?.note || busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      setVersion(await readAll(editor.note.id, revision));
+    } catch (cause) {
+      setError(uiError(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function close() {
+    if (busy) return;
+    cancelQuote();
+    retainDraft();
+    if (typeof bridge.notesDraft !== 'function') { if (dirty || drafts.current.size) setClosing(true); else onClose(); return; }
+    setBusy(true);
+    const token = ++request.current, closingContext = quoteDestination.current.context;
+    await Promise.allSettled([...new Set([...queuedDrafts.current.keys(), ...draftQueues.current.keys()])].map(key => flushDraft(key)));
+    if (!mounted.current || token !== request.current) return;
+    setBusy(false);
+    if (!quoteDestination.current.active || quoteDestination.current.context !== closingContext) return;
+    if ([...drafts.current].some(([key, draft]) => backedDrafts.current.get(key) !== draft)) setClosing(true);
+    else onClose();
+  }
+  async function openMaterial(discuss = false) {
+    const source = editor?.note?.source.material;
+    if (!source || !onOpenMaterialSource || sourceOpening) return;
+    cancelQuote();
+    setSourceOpening(true); setSourceError('');
+    try { await onOpenMaterialSource(source, discuss); }
+    catch (cause) { if (mounted.current) setSourceError(uiError(cause)); }
+    finally { if (mounted.current) setSourceOpening(false); }
+  }
+  const date = (value: string) => formatDateTime(value, timeZone);
+  const hasContent = !!editor?.title.trim() || !!editor?.body.trim();
+  escapeKey.current = event => {
+    if (!active || event.key !== 'Escape' || event.defaultPrevented || event.isComposing
+      || !(event.target instanceof Node) || !host.current?.contains(event.target) && event.target !== document.body) return;
+    event.preventDefault(); event.stopPropagation();
+    if (menuOpen) { setMenuOpen(false); menuButton.current?.focus(); }
+    else if (indexOpen) { setIndexOpen(false); indexButton.current?.focus(); }
+    else if (discussion) closeDiscussion();
+    else void close();
+  };
+  return (
+    <div className="notes-host" hidden={!active} ref={host} data-discussion-pane={discussionPane}
+      onPointerDownCapture={() => { viewingGeneration.current++; }} onWheelCapture={() => { viewingGeneration.current++; }}
+      onKeyDownCapture={() => { viewingGeneration.current++; }}
+      onScrollCapture={() => { setSelection(undefined); reportReturnAddress(false); }}>
+      <NotesFrame embedded={embedded} onClose={close}>
+        {discussion && <nav className="notes-discussion-tabs" aria-label="Notes and conversation">
+          <button type="button" aria-pressed={discussionPane === 'note'} onClick={() => setDiscussionPane('note')}>Notes</button>
+          <button type="button" aria-pressed={discussionPane === 'chat'} onClick={() => setDiscussionPane('chat')}>Talk together</button>
+        </nav>}
+        <div className="notes-folio">
+        <div className="notes-toolbar">
+          <button type="button" className="notes-back" disabled={busy} onClick={() => void close()}><ChevronLeft size={16} aria-hidden="true" /><span>Keep</span></button>
+          <div className="notes-page-tools">
+            <button ref={indexButton} type="button" className="notes-index-toggle" aria-label="Browse notes" title="Browse notes"
+              aria-expanded={indexOpen} aria-controls={`${panelId}-index`} disabled={busy || quoting} onClick={toggleIndex}>
+              <BookOpen size={17} aria-hidden="true" /><span>Notes</span><ChevronDown size={12} aria-hidden="true" />
+            </button>
+            <div className="notes-object-menu">
+              <button ref={menuButton} type="button" className="notes-icon-button" aria-label="Current note actions" title="Current note actions"
+                aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={`${panelId}-menu`} disabled={busy || quoting}
+                onClick={() => setMenuOpen(current => !current)}><MoreHorizontal size={19} aria-hidden="true" /></button>
+              {menuOpen && <div ref={objectMenu} id={`${panelId}-menu`} role="menu" className="notes-object-menu-items"
+                onBlur={event => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setMenuOpen(false); }}
+                onKeyDown={event => {
+                  const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+                  const current = items.indexOf(document.activeElement as HTMLButtonElement);
+                  const next = event.key === 'ArrowDown' ? (current + 1) % items.length : event.key === 'ArrowUp' ? (current + items.length - 1) % items.length
+                    : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : undefined;
+                  if (next !== undefined) { event.preventDefault(); items[next]?.focus(); }
+                }}>
+                <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setIndexOpen(false); void newNote(); }}><Plus size={15} />Write a page</button>
+                {editor?.note && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void showHistory(); }}><History size={15} />Earlier versions</button>}
+                <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setState('deleted'); setIndexOpen(true); }}><RotateCcw size={15} />Recently put away</button>
+                {editor?.note && !deleted && <button type="button" role="menuitem" disabled={dirty} title={dirty ? 'Save your latest writing before putting this page away' : 'Can be restored later'}
+                  onClick={() => { setMenuOpen(false); void mutate('state', 'deleted'); }}><Trash2 size={15} />Put this page away</button>}
+                {editor?.note && undoRevision && !dirty && <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); void mutate('undo', undoRevision); }}><RotateCcw size={15} />Undo this change</button>}
+              </div>}
+            </div>
+          </div>
+        </div>
+        {closing && (
+          <div className="notes-leave" role="alert">
+            <span>Your latest writing is unsaved. Save it first?</span>
+            <div className="notes-inline-actions">
+              {dirty && (
+                <button
+                  className="primary-button"
+                  disabled={busy || !hasContent || !!conflict}
+                  onClick={() =>
+                    void save().then((saved) => {
+                      if (saved && drafts.current.size === 0) onClose();
+                    })
+                  }
+                >
+                  Save this page
+                </button>
+              )}
+              <button className="text-button" disabled={busy} onClick={() => setClosing(false)}>
+                Keep writing
+              </button>
+              <button
+                className="text-button"
+                disabled={busy}
+                onClick={() => {
+                  for (const key of drafts.current.keys()) void discardDraft(key);
+                  drafts.current.clear();
+                  setDraftCount(0);
+                  setEditor(editor?.note ? editable(editor.note) : undefined);
+                  resetFeedback();
+                  onClose();
+                }}
+              >
+                Discard these changes and return
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="notes-workspace" aria-busy={busy}>
+          <aside className="notes-index" id={`${panelId}-index`} aria-label="Note list" hidden={!indexOpen}>
+            <div className="notes-index-heading"><span>Notes</span><IconButton label="Close note drawer" onClick={() => { setIndexOpen(false); indexButton.current?.focus(); }}><X size={16} /></IconButton></div>
+            <form className="notes-search" onSubmit={event => { event.preventDefault(); if (!busy) setAppliedQuery(query); }}>
+              <Search size={15} aria-hidden="true" />
+              <input ref={indexSearch} aria-label="Search notes" placeholder="Find something you wrote" value={query} disabled={busy} onChange={event => setQuery(event.target.value)} />
+              <button type="submit" className="text-button" disabled={loading || busy}>Search</button>
+            </form>
+            <div className="notes-tabs" role="tablist" aria-label="Note scope">
+              <button
+                role="tab"
+                aria-selected={state === 'active'}
+                disabled={busy}
+                onClick={() => setState('active')}
+              >
+                Saved notes
+              </button>
+              <button
+                role="tab"
+                aria-label="Trash"
+                aria-selected={state === 'deleted'}
+                disabled={busy}
+                onClick={() => setState('deleted')}
+              >
+                Recently put away
+              </button>
+            </div>
+            {loading && !list.items.length && (
+              <p className="notes-empty" role="status">
+                Opening notes…
+              </p>
+            )}
+            {!loading && !list.items.length && (
+              <p className="notes-empty">
+                {appliedQuery
+                  ? 'No match found. Try different words.'
+                  : state === 'deleted'
+                    ? 'No notes have been put away yet.'
+                    : 'Start a page with whatever comes to mind.'}
+              </p>
+            )}
+            <div className="notes-list">
+              {list.items.map(note => <KeptNoteEntry key={note.id} note={note} active={active} boundary={quoteBoundary}
+                busy={busy} current={editor?.note?.id === note.id}
+                hasDraft={drafts.current.has(note.id) || savedDrafts.current.has(note.id)} date={date(note.updatedAt)}
+                onOpen={() => { setIndexOpen(false); void open(note.id); }} />)}
+            </div>
+            {list.hasMore && (
+              <button
+                className="text-button notes-more"
+                disabled={loading || busy}
+                onClick={() => void loadList(state, appliedQuery, true)}
+              >
+                Load more
+              </button>
+            )}
+            {draftCount > 0 && (drafts.current.has('new') || savedDrafts.current.has('new')) && editor?.note && (
+              <button className="text-button notes-more" disabled={busy} onClick={newNote}>
+                Continue the last page
+              </button>
+            )}
+          </aside>
+          <section className="notes-reading-area" aria-label={editor?.note?.source.referenceOnly ? 'Excerpt and your thoughts' : editor?.note?.title || 'Note body'}>
+            {!editor ? (
+              <div className="notes-paper notes-start">
+                <div>
+                  <p className="notes-start-title">Room for your thoughts.</p>
+                  <p>One sentence, or a little more.</p>
+                  <button className="text-button" disabled={busy} onClick={() => recentDraft && recentDraft !== 'new' ? void open(recentDraft) : void newNote()}>
+                    <Plus size={17} />
+                    {recentDraft ? 'Continue the last page' : 'Write the first sentence'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div
+                className={`notes-reader-grid ${history || conflict ? 'has-companion-panel' : ''}`}
+              >
+                <div className="notes-paper" data-presence-edge="notes-paper" data-presence-edge-label="The page you are writing" data-presence-edge-sides="top right left">
+                  {deleted && <p className="notes-archived">This page is put away</p>}
+                  <form
+                    className="notes-editor"
+                    data-bookmark-target="note"
+                    onDragOver={event => { if (bookmarkTray && event.dataTransfer.types.includes(SOURCE_BOOKMARK_MIME)) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'copy'; } }}
+                    onDrop={event => { const reference = readBookmarkTransfer(event.dataTransfer); if (reference && bookmarkTray) { event.preventDefault(); event.stopPropagation(); void bookmarkTray.offer(reference, 'note'); } }}
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void save();
+                    }}
+                  >
+                    <label className="notes-title-label">
+                      <span className="sr-only">Note title</span>
+                      <input
+                        className="notes-title"
+                        aria-label="Note title"
+                        placeholder="Name this page"
+                        value={editor.note?.source.referenceOnly && editor.title === referenceNoteTitle ? '' : editor.title}
+                        maxLength={NOTE_LIMITS.title}
+                        readOnly={deleted || busy}
+                        onChange={(event) => changeDraft({ title: editor.note?.source.referenceOnly && !event.target.value ? referenceNoteTitle : event.target.value })}
+                      />
+                    </label>
+                    {editor.note?.source.referenceOnly && <section className="note-live-excerpt" aria-label="Quoted source text" aria-busy={excerptLoading}>
+                      {sourceExcerpt && <><header><BookOpen size={15} /><span>{sourceExcerpt.title}{sourceExcerpt.page ? ` · p. ${sourceExcerpt.page}` : ''}</span></header><blockquote tabIndex={-1} onDragStart={event => {
+                        const selection = window.getSelection(), node = event.currentTarget;
+                        if (!selection?.rangeCount || selection.isCollapsed || node.textContent !== sourceExcerpt.text) { event.preventDefault(); return; }
+                        const range = selection.getRangeAt(0);
+                        if (!node.contains(range.startContainer) || !node.contains(range.endContainer)) { event.preventDefault(); return; }
+                        const prefix = range.cloneRange(); prefix.selectNodeContents(node); prefix.setEnd(range.startContainer, range.startOffset);
+                        const start = sourceExcerpt.reference.reference.start + Array.from(prefix.toString()).length,
+                          end = start + Array.from(range.toString()).length;
+                        const reference = sourceBookmarkReferenceSchema.parse({ ...sourceExcerpt.reference,
+                          reference: { ...sourceExcerpt.reference.reference, start, end } });
+                        bookmarkDrag.current = reference; bookmarkTray?.stage(reference, node);
+                        writeBookmarkTransfer(event.dataTransfer, reference);
+                      }} onDragEnd={releaseBookmarkDrag}>{sourceExcerpt.text}</blockquote>
+                        <div>{sourceExcerpt.reference.kind === 'material' && onOpenMaterialSource && <button type="button" className="text-button" disabled={busy || sourceOpening} onClick={() => void openMaterial()}>Open original</button>}
+                          {sourceExcerpt.reference.kind === 'notebook' && <button type="button" className="text-button" disabled={busy || sourceOpening} onClick={() => void openNotebookSource()}>Open original</button>}
+                          {sourceExcerpt.reference.kind === 'conversation' && onOpenConversationSource && <button type="button" className="text-button" disabled={busy || sourceOpening} onClick={() => {
+                            const reference = sourceExcerpt.reference, generation = excerptGeneration.current;
+                            if (reference.kind === 'conversation') void onOpenConversationSource(reference.reference).catch(cause => {
+                              if (generation === excerptGeneration.current && quoteDestination.current.active) setExcerptError(uiError(cause));
+                            });
+                          }}>Open original</button>}
+                          {bookmarkTray && <button type="button" className="text-button" disabled={busy || sourceOpening} draggable={!busy && !sourceOpening} onDragStart={event => {
+                            bookmarkDrag.current = sourceExcerpt.reference;
+                            bookmarkTray.stage(sourceExcerpt.reference, event.currentTarget.closest('.note-live-excerpt')?.querySelector<HTMLElement>('blockquote'));
+                            writeBookmarkTransfer(event.dataTransfer, sourceExcerpt.reference);
+                          }} onDragEnd={releaseBookmarkDrag} onClick={event => void bookmarkTray.cite(sourceExcerpt.reference,
+                            event.currentTarget.closest('.note-live-excerpt')?.querySelector<HTMLElement>('blockquote'))}><MessageCircle size={14} />Quote passage</button>}</div></>}
+                      {excerptLoading && <p role="status">Returning to the saved passage…</p>}{excerptError && <><p role="status">{excerptError}</p><div>
+                        {(editor.note.source.notebook || editor.note.source.material && onOpenMaterials) && <button type="button" className="text-button" disabled={busy || sourceOpening} onClick={() => void recoverOriginalPage()}>{editor.note.source.notebook ? 'View the current original page' : 'Import material again'}</button>}
+                        <button type="button" className="text-button" disabled={busy || excerptLoading} onClick={() => setExcerptRefresh(value => value + 1)}>Look again</button></div></>}
+                    </section>}
+                    <label className="notes-body-label">
+                      <span className={editor.note?.source.referenceOnly ? 'note-own-thoughts-label' : 'sr-only'}>{editor.note?.source.referenceOnly ? 'Your thoughts' : 'Note body'}</span>
+                      <textarea
+                        className="notes-body"
+                        rows={6}
+                        aria-label="Note body"
+                        placeholder={editor.note?.source.referenceOnly ? 'Write your own understanding…' : 'Keep writing…'}
+                        value={editor.body}
+                        maxLength={NOTE_LIMITS.body}
+                        readOnly={deleted || busy}
+                        onChange={(event) => changeDraft({ body: event.target.value })}
+                        onPointerUp={event => selectPassage(event.currentTarget, { x: event.clientX, y: event.clientY })}
+                        onKeyDown={event => {
+                          if (event.nativeEvent.isComposing) return;
+                          if (event.key === 'Escape' && selection?.editor === editor) {
+                            event.preventDefault(); event.stopPropagation(); cancelQuote();
+                          }
+                        }}
+                        onKeyUp={event => {
+                          if (event.nativeEvent.isComposing) return;
+                          if (event.key === 'Escape') cancelQuote();
+                          else selectPassage(event.currentTarget);
+                        }}
+                        onScroll={() => setSelection(undefined)}
+                        onDragStart={event => {
+                          if (!bookmarkTray) return;
+                          if (dirty || !editor.note) { event.preventDefault(); setReceipt('This sentence is still in the draft. Choose Save and quote.'); return; }
+                          if (!selection || selection.editor !== editor) { event.preventDefault(); return; }
+                          const reference: SourceBookmarkReference = { kind: 'notebook', reference: {
+                            id: editor.note.id, revision: editor.note.revision, sha256: editor.note.sha256,
+                            start: selection.start, end: selection.end } };
+                          bookmarkDrag.current = reference; bookmarkTray.stage(reference, event.currentTarget);
+                          writeBookmarkTransfer(event.dataTransfer, reference);
+                        }}
+                        onDragEnd={releaseBookmarkDrag}
+                        onBlur={event => {
+                          if (!(event.relatedTarget instanceof Element) || !event.relatedTarget.closest('.note-selection-actions, .source-bookmark-tray')) setSelection(undefined);
+                        }}
+                      />
+                    </label>
+                    {selection && selection.editor === editor && active && <div className="note-selection-actions"
+                      style={{ left: selection.left, top: selection.top }} role="group" aria-label="Note selection actions"
+                      onKeyDown={event => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault(); cancelQuote();
+                          host.current?.querySelector<HTMLTextAreaElement>('textarea.notes-body')?.focus({ preventScroll: true });
+                        }
+                      }}
+                      onBlur={event => {
+                        if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)
+                          && !(event.relatedTarget instanceof Element && event.relatedTarget.closest('.source-bookmark-tray'))) setSelection(undefined);
+                      }}
+                      onMouseDown={event => event.preventDefault()}>
+                      {onQuote && <button type="button" disabled={busy || quoting || !quoteEnabled || !!conflict}
+                        onClick={() => void discussSelection()}><MessageCircle size={16} />{dirty ? 'Save and discuss' : 'Discuss this sentence'}</button>
+                      }
+                      {bookmarkTray && <button type="button" disabled={busy || quoting || !!conflict} onClick={() => void pickSelection()}><FileText size={16} />{dirty ? 'Save and keep as note' : 'Save as note'}</button>}
+                    </div>}
+                    {editor.note?.source.notebook && !editor.note.source.referenceOnly && <div className="note-material-source"><div className="note-material-source-name"><FileText size={17} /><span>From the original note</span></div>
+                      <button type="button" className="text-button" disabled={sourceOpening || busy} onClick={() => void openNotebookSource()}><BookOpen size={16} />Open original</button></div>}
+                    {editor.note?.source.notebook && sourceError && <p className="note-material-source-error" role="status">{sourceError}</p>}
+                    {editor.note?.source.material && !editor.note.source.referenceOnly && <div className="note-material-source">
+                      <div className="note-material-source-name"><FileText size={17} /><span>{editor.note.source.material.name}{editor.note.source.material.page ? ` · p. ${editor.note.source.material.page}` : ''}</span></div>
+                      <div className="note-material-source-actions">
+                        {onOpenMaterialSource && <><button type="button" className="text-button" disabled={sourceOpening} onClick={() => void openMaterial()}><BookOpen size={16} />Open original</button>
+                          <button type="button" className="text-button" disabled={sourceOpening} onClick={() => void openMaterial(true)}><MessageCircle size={16} />Quote passage</button></>}
+                      </div>
+                      {sourceError && <div className="note-material-source-error" role="alert"><p>{sourceError}</p>{onOpenMaterials && <button type="button" className="text-button" onClick={onOpenMaterials}>Import material again</button>}</div>}
+                    </div>}
+                    <div className="notes-editor-actions">
+                      <div className="notes-save-anchor">{deleted ? (
+                        <button
+                          className="primary-button"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void mutate('state', 'active')}
+                        >
+                          <RotateCcw size={16} />
+                          Restore note
+                        </button>
+                      ) : dirty ? (
+                        <button
+                          className="primary-button"
+                          type="submit"
+                          aria-label="Save note"
+                          disabled={busy || !hasContent || !dirty || !!conflict}
+                        >
+                          {busy ? 'Saving…' : error ? 'Save again' : 'Save'}
+                        </button>
+                      ) : editor.note ? <span className="notes-saved-mark" title={`Saved · ${date(editor.note.updatedAt)}`} aria-label={`Saved · ${date(editor.note.updatedAt)}`}><Check size={18} aria-hidden="true" /></span> : null}</div>
+                      {receipt && (
+                        <span className={`notes-receipt${receiptKind === 'saved' ? ' sr-only' : ''}`} role="status">
+                          {receipt}
+                        </span>
+                      )}
+                    </div>
+                  </form>
+                </div>
+                {(history || conflict) && (
+                  <aside
+                    className="notes-side"
+                    aria-label={conflict ? 'Compare different changes' : 'Earlier versions'}
+                  >
+                    {conflict && (
+                      <section className="notes-conflict" role="alert">
+                        <header>
+                          <h3>This page has new changes</h3>
+                        </header>
+                        <p>Your writing is preserved. Review the other version before choosing what to keep.</p>
+                        <div className="notes-conflict-compare">
+                          <details open>
+                            <summary>Your latest writing</summary>
+                            <h4>{editor.note ? ownNoteLabel({ ...editor.note, title: editor.title }) : editor.title || 'Untitled page'}</h4>
+                            <pre>{editor.body}</pre>
+                          </details>
+                          <details open>
+                            <summary>
+                              New content
+                              {conflict.state === 'deleted' ? ' · Put away' : ''}
+                            </summary>
+                            <h4>{ownNoteLabel(conflict)}</h4>
+                            <pre>{conflict.body}</pre>
+                          </details>
+                        </div>
+                        <div className="notes-side-actions">
+                          {conflict.state === 'active' && (
+                            <button
+                              className="primary-button"
+                              disabled={busy || !hasContent}
+                              onClick={() => void save(true)}
+                            >
+                              Keep my writing and save
+                            </button>
+                          )}
+                          <button
+                            className="text-button"
+                            disabled={busy}
+                            onClick={() => {
+                              setEditor(editable(conflict));
+                              drafts.current.delete(conflict.id);
+                              void discardDraft(conflict.id);
+                              setConflict(undefined);
+                              updateDraftCount();
+                            }}
+                          >
+                            Use new content
+                          </button>
+                        </div>
+                      </section>
+                    )}
+                    {history && (
+                      <section className="notes-history">
+                        <header>
+                          <h3>Earlier versions</h3>
+                          <IconButton
+                            label="Close version history"
+                            onClick={() => {
+                              setHistory(undefined);
+                              setVersion(undefined);
+                            }}
+                          >
+                            <X size={17} />
+                          </IconButton>
+                        </header>
+                        {version ? (
+                          <>
+                            <button
+                              className="text-button notes-history-back"
+                              onClick={() => setVersion(undefined)}
+                            >
+                              <ChevronLeft size={15} />
+                              View other versions
+                            </button>
+                            <div className="notes-version-copy">
+                              <p>{date(version.updatedAt)}</p>
+                              <h4>{ownNoteLabel(version)}</h4>
+                              <pre>{version.body || 'This page has no body text yet.'}</pre>
+                            </div>
+                            <div className="notes-side-actions">
+                              <button
+                                className="primary-button"
+                                disabled={
+                                  busy || dirty || version.revision === editor.note?.revision
+                                }
+                                onClick={() => void mutate('undo', version.revision)}
+                              >
+                                {version.revision === editor.note?.revision
+                                  ? 'Current version'
+                                  : 'Use this version'}
+                              </button>
+                              {dirty && <p>Save your latest writing before restoring a previous version.</p>}
+                              <button
+                                className="text-button"
+                                onClick={() => {
+                                  setHistory(undefined);
+                                  setVersion(undefined);
+                                }}
+                              >
+                                Return to current version
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="notes-history-list">
+                              {history.items.map((item) => (
+                                <button
+                                  className="notes-history-row"
+                                  key={item.revision}
+                                  disabled={busy}
+                                  onClick={() => void viewVersion(item.revision)}
+                                >
+                                  <span>
+                                    <time>{date(item.updatedAt)}</time>
+                                    <small>
+                                      {
+                                        {
+                                          create: 'Created this page',
+                                          edit: 'Edited this page',
+                                          delete: 'Put this page away',
+                                          restore: 'Restore note',
+                                          undo: 'Restored a previous version',
+                                        }[item.operation]
+                                      }
+                                      {item.revision === editor.note?.revision ? ' · Current' : ''}
+                                    </small>
+                                  </span>
+                                  <ChevronRight size={15} />
+                                </button>
+                              ))}
+                            </div>
+                            {history.hasMore && (
+                              <button
+                                className="text-button notes-more"
+                                disabled={busy}
+                                onClick={() => void showHistory(true)}
+                              >
+                                Earlier history
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </section>
+                    )}
+                  </aside>
+                )}
+              </div>
+            )}
+            {error && (
+              <div className="inline-problem notes-error" role="alert">
+                <span>{error}</span>
+                {!dirty && <button className="text-button" disabled={busy} onClick={() => { setIndexOpen(true); void loadList(); }}>
+                  Reopen note list
+                </button>}
+              </div>
+            )}
+          </section>
+        </div>
+        </div>
+        <section className="notes-discussion" hidden={!discussion} aria-label="Discuss this page">
+          <div className="notes-discussion-tools"><button type="button" className="notes-icon-button" aria-label="Close conversation and return to the selected sentence" title="Return to this sentence" onClick={closeDiscussion}><X size={16} aria-hidden="true" /></button></div>
+          {discussion}
+        </section>
+      </NotesFrame>
+    </div>
+  );
+}

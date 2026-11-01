@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "soyo-neutral-presence-time-night-included-v1",
+  "sceneFamily": "literary-room-v1",
+  "character": "soyo",
+  "activity": "chat",
+  "purpose": "neutral-presence",
+  "neutralTime": "night",
+  "light": "night",
+  "palette": "rain",
+  "width": 1536,
+  "height": 1024,
+  "mother": "soyo-neutral-presence-time-night-included-v1-mother.png",
+  "background": "soyo-neutral-presence-time-night-included-v1-background.png",
+  "mask": "soyo-neutral-presence-time-night-included-v1-mask.png",
+  "maskMode": "luminance",
+  "contactMask": "soyo-neutral-presence-time-night-included-v1-contact-mask.png",
+  "seat": [
+    0.8072916666666666,
+    0.6201171875
+  ],
+  "ground": [
+    0.6888020833333334,
+    0.9072265625
+  ],
+  "bodyBounds": [
+    0.6243489583333334,
+    0.09765625,
+    0.8736979166666666,
+    0.908203125
+  ],
+  "safeTextBoundary": 0.55,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "62.434895833333336% 9.765625%, 87.36979166666666% 9.765625%, 87.36979166666666% 90.8203125%, 62.434895833333336% 90.8203125%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "82a918b778cbe9549572410ceba0c27af7c0e11d33f9f2ae14614a280e36d9b6",
+      "background": "4142e34426feb030bf4b471c084bb089850e4a8c28f44b01e96092781f46e90a",
+      "F": "0775f81ebda27f9294d1e08cc888d8a795f555e4aa02921e19f0bb821aa13e79",
+      "S": "2c5e517a2dfdf400f4e5b053fb30c96d6eaca52a6a52046fc0c1c31bf4e8b5cb"
+    },
+    "geometryEvidence": {
+      "jointReceiverEnvelope": {
+        "sourcePixels": [
+          957,
+          100,
+          1342,
+          934
+        ],
+        "normalized": [
+          0.623046875,
+          0.09765625,
+          0.8736979166666666,
+          0.912109375
+        ],
+        "basis": "Read-only MAX(L(F),L(S)) >8 envelope including actual fixed local receiver; no contour contraction or alpha change."
+      },
+      "familyFramingCodeUnchanged": true
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/soyo-neutral-presence-time-night-included-v1.json"
+  }
+}

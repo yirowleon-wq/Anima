@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "scene": "soyo-chat-apricot-literary-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "20942d064ae0af479ede2868d689e105433022e8c0448d45301bd7fc9301bfd8",
+    "background": "f9a1a6a33c682a27dd2a8bf40ff361e0c9ceed52bbc7bd811db70694bef8664c",
+    "F": "5ba1a554039012e7bf744e028f18a4c16b335a6e12a8bbf426b2e371e6578200",
+    "S": "f170ba21bfff70b2db41ef2fa559318f70f1994556dd85253825cc3ec7ee0c90"
+  },
+  "visibleGeometry": {
+    "actualVisibleBodyEnvelope": [
+      0.4869791666666667,
+      0.1025390625,
+      0.7473958333333334,
+      0.8642578125
+    ],
+    "FWholeCoverageDominantPixelBBox": [
+      751,
+      105,
+      1138,
+      876
+    ],
+    "receiverCoverageDominantPixelBBox": [
+      743,
+      535,
+      1124,
+      880
+    ],
+    "knownIncludedMaterialNotBody": []
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

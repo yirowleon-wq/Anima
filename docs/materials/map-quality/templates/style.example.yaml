@@ -1,0 +1,30 @@
+template_only: true
+style_version: null
+preserved_direction: dark_warm_gray_gold_restrained_transparency
+semantic_tokens:
+  base.ground: {meaning: dark_ground, implementation_locator: null}
+  road.primary: {meaning: primary_road, implementation_locator: null}
+  road.secondary: {meaning: secondary_road, implementation_locator: null}
+  road.walk: {meaning: walkable_path, implementation_locator: null}
+  road.casing: {meaning: cartographic_road_edge, implementation_locator: null}
+  building.roof: {meaning: roof_surface, implementation_locator: null}
+  building.wall: {meaning: wall_surface, implementation_locator: null}
+  land.grass: {meaning: evidenced_grass, implementation_locator: null}
+  land.canopy: {meaning: evidenced_canopy_projection, implementation_locator: null}
+  water.surface: {meaning: water_surface, implementation_locator: null}
+  paving.plaza: {meaning: paved_plaza, implementation_locator: null}
+  sports.marking: {meaning: sport_rule_marking, implementation_locator: null}
+  state.selected: {meaning: selected_entity_state, implementation_locator: null}
+  state.route: {meaning: active_route_state, implementation_locator: null}
+  effect.shadow: {meaning: generated_lighting_effect, implementation_locator: null}
+  audit.issue: {meaning: debug_only_issue_overlay, implementation_locator: null}
+scale_bands:
+  campus: {ground_resolution_or_zoom: null, required_label_classes: []}
+  zone: {ground_resolution_or_zoom: null, required_label_classes: []}
+  block: {ground_resolution_or_zoom: null, required_label_classes: []}
+  close: {ground_resolution_or_zoom: null, required_label_classes: []}
+object_overrides_with_evidence: []
+label_priority_and_collision_rules_locator: null
+lighting_and_transparency_rules_locator: null
+normal_mode_review_ids: []
+status: NOT_EVALUATED

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>studio.anima.location</string>
+  <key>CFBundleExecutable</key><string>AnimaLocation</string>
+  <key>CFBundleName</key><string>Anima Location</string>
+  <key>CFBundleDisplayName</key><string>Anima Location</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1.4</string>
+  <key>CFBundleVersion</key><string>5</string>
+  <key>MinimumOSVersion</key><string>16.0</string>
+  <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+  <key>UILaunchScreen</key><dict/>
+  <key>NSLocationWhenInUseUsageDescription</key><string>After you explicitly allow this workout, share its location with Anima on the local desktop. Pausing, ending, or disconnecting stops reading.</string>
+</dict></plist>

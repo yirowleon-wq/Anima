@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "scope": "Optional composition studies, separate from the kept artwork library. They do not implement or accept a development stage.",
+  "requestFieldMeaning": "The request field contains a design brief adapted from recorded material. submittedRequestSha256 preserves the recorded submitted-request hash separately; the displayed text is not necessarily verbatim.",
+  "assets": [
+    {
+      "file": "visual-assets/optional-drafts/materials-study-v1.png",
+      "sha256": "6703d6e8c2e609e3464afc6f7779e866e91299bf099dc2550d8d632c4d1c9bbd",
+      "bytes": 2022058,
+      "width": 1536,
+      "height": 1024,
+      "status": "optional-design-study",
+      "runtimeAdopted": false,
+      "generationTool": "imagegen tool",
+      "internalModelVersion": "not recorded",
+      "requests": [
+        {
+          "requestedAt": "2026-11-01T11:20:12.513Z",
+          "requestType": "Adapted design brief",
+          "request": "Use case: ui-mockup. Create one finished desktop application design reference for Anima, an English university-life companion app. This is the materials/PDF-and-study page, not a marketing landing page. Landscape 1536x1024, elegant detailed literary anime illustration with warm natural wood, tall window, quiet fictional lakeside hills outside; a calm recognizable Sakiko Togawa with long pale lavender hair, golden eyes and navy school cardigan sits naturally supported at the far right, reading her own book, youthful original anime identity. The main attention is a substantial highly legible pair of native cream paper reading surfaces on the left/center: the left has a short real English mathematical passage about rotation, one selected equation e^(it)=cos(t)+i sin(t), and a small page number; the adjacent working paper preserves the user's first line and a subtle pencil-like indication at the exact corresponding line. A restrained conversation composer at the bottom belongs to the same workspace, with the draft 'Why does this step work?' visible. Minimal top navigation with exact English labels 'Anima', 'Conversation', 'Today', 'Keep'. Controls include a clear split divider, small Back control, page/zoom controls and quiet source bookmark. No floating card wall, no repeated explanatory subtitle, no status dashboard. English labels and math only, English lettering and mathematical notation only, no real school landmarks, accounts or logos. No green UI; natural foliage and clothing intrinsic colors may remain. Four-point grid and ample English reading width, 16px-scale body text, warm ink, gold accent. The view must convey live-copyable text and editable study paper as a design intent, not bake an illustrated fake application as the final product. Do not add extra limbs, a pointing hand over text or unsupported floating character. This standalone image is an image-led design reference for a real component implementation.",
+          "submittedRequestSha256": "c82f972d96e436d61aeb13dfa24fde4c184bd8da53a9db0cce4911d014429125"
+        },
+        {
+          "requestedAt": "2026-11-01T11:31:26.594Z",
+          "requestType": "Adapted design brief",
+          "request": "Edit this English Anima materials-and-study UI design reference with ONLY the following precise corrections. Preserve the full 1536x1024 composition, warm illustrated room, supported youthful Sakiko, paper pair, mathematical passage, editable draft, lighting and all spacing. In the top navigation use 'Chat', 'Today', 'Keep', with Chat selected and Today unselected; Anima remains the brand. Make EVERY book cover/spine in the room, including the foreground bottom/right books and Sakiko's held book, entirely unlettered using plain textured covers, preserving its perspective and lighting. The readable text inside the two working papers and the composer stays natural English and mathematics as currently shown. No other language characters or pseudo-writing anywhere. Keep real source and user's attempt distinct. This is an image-led implementation reference, not a runtime screenshot. Do not add controls, cards, captions or limbs.",
+          "submittedRequestSha256": "65a05306cc3f36b70da3e3e757c8273f54dcdc7c8cd490d1115d0665bb7815d2"
+        }
+      ],
+      "scope": "Optional concept illustration; live components, source data and future character performances remain separate."
+    },
+    {
+      "file": "visual-assets/optional-drafts/notes-v1.png",
+      "sha256": "84d5c40d73872e7f4b31478f94925f253eca05d43cf1bb1d353285497e9f501e",
+      "bytes": 2110361,
+      "width": 1536,
+      "height": 1024,
+      "status": "optional-design-study",
+      "runtimeAdopted": false,
+      "generationTool": "imagegen tool",
+      "internalModelVersion": "not recorded",
+      "requests": [
+        {
+          "requestedAt": "2026-11-01T12:14:59.971Z",
+          "requestType": "Adapted design brief",
+          "request": "Use case: ui-mockup. One complete English Anima desktop Notes screen design reference, landscape 1536x1024. Anima is a quiet university-life companion app. Build a beautiful credible literary anime room with tall timber window, warm dusk, natural wood and a few plants. Sakiko Togawa, youthful anime identity, long pale lavender hair/golden eyes/navy cardigan, sits naturally supported at the RIGHT, occupied with her own plain unlettered book, attentive without pointing across the text. The LEFT two thirds has one calm native-paper note editor, comfortably readable at a normal window size. Top navigation exact text 'Anima', 'Chat', 'Today', 'Keep', with Keep selected. Note header: a clear Back to Keep control; title 'Rotation and return'; modest browse-notes icon and one overflow menu. The note body is two editable paragraphs: 'A rotation preserves length while changing direction.' and 'I want to compare yesterday’s sketch with the complex-number picture, without replacing my own first attempt.' A quiet inline Save control at the paper footer, no giant blue button, no task checkbox, no progress badge, no source-number pretending the note is a PDF. One unobtrusive collapsed conversation edge at the paper's bottom; no second chat input, no category button wall. Make the title, body and one next action carry the hierarchy. Paper texture is restrained; warm ink, gold accent, no green UI. English text only, every decorative book spine/cover must be completely unlettered, English lettering only without decorative pseudo-writing, no school logos or real identifiable campus. Preserve believable limbs, weight, chair/seat support, character and furniture scale. This is an image-led design reference; actual note text, save, history, trash, focus and conversation are implemented as real components, not a screen-sized background.",
+          "submittedRequestSha256": "cd086653e2edb97fb097b5fe12c466598c98dbbfec66c900c34aad318c614253"
+        }
+      ],
+      "scope": "Optional concept illustration; live components, source data and future character performances remain separate."
+    },
+    {
+      "file": "visual-assets/optional-drafts/map-v1.png",
+      "sha256": "2ac2bc836645a2522524430739dd0a05a4c065a4e04398192307b424a35f2a74",
+      "bytes": 2665768,
+      "width": 1536,
+      "height": 1024,
+      "status": "optional-design-study",
+      "runtimeAdopted": false,
+      "generationTool": "imagegen tool",
+      "internalModelVersion": "not recorded",
+      "requests": [
+        {
+          "requestedAt": "2026-11-01T12:24:07.119Z",
+          "requestType": "Adapted design brief",
+          "request": "Use case: ui-mockup. Create one complete Anima desktop map-and-route design reference in English, 1536x1024 landscape. Warm refined literary-anime room at a desk, morning mist palette with cream paper, slate-blue ink and restrained muted gold. One substantial native map surface occupies the CENTER/LEFT; do not make a dashboard or stack multiple cards. The map is explicitly fictional, with exact small title 'Example campus' and subtitle 'Synthetic map'. Show a simple coherent walkable network connecting 'Demo Library', 'Demo Studio', 'Demo Commons', 'Demo Meadow', and 'Demo Unmapped Hall'; it is a neutral schematic, not a real university plan. A gold candidate path follows actual visible paths from Demo Library to Demo Commons, with start/end and one route choice. The unmapped hall has an unknown entrance, clearly indicated with a subtle dotted access suggestion rather than a pretend confirmed door. A compact route paper edge says 'Library → Commons', with actions 'Use this route', 'Keep for later', and a clear 'Back'. The ongoing conversation composer remains at the bottom with unsent English text 'Could we take the quieter path?' A small miniaturized route carrier makes it clear this same map can fold back into the conversation. Top navigation exact text 'Anima', 'Chat', 'Today', 'Keep' with Chat selected. Minimal zoom, north and expand controls; NO GPS position dot, no Locate or automatic positioning controls. At far RIGHT a youthful anime Sakiko Togawa with long pale lavender hair and golden eyes is naturally supported by her desk chair, looking toward the map without covering controls or requiring a pointing-hand pose. All book covers/spines are unlettered. All readable text must be natural English; English lettering only without decorative pseudo-writing, accounts, real campus names, real coordinate labels or logos. No green UI or green map fill; natural real foliage only. Show credible furniture, support, contact and lighting. This is an image-led reference for real shared MapSurface/camera/route controls, not a replacement map data source or a screenshot claiming implementation.",
+          "submittedRequestSha256": "da008ad7ba42392c9f30fd1ba9f0a74a6a3024745d06fb638b312895d2638706"
+        }
+      ],
+      "scope": "Optional concept illustration; live components, source data and future character performances remain separate."
+    }
+  ]
+}

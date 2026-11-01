@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-chat-apricot-literary-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "8d8ca2d001893c16106ab797ec4a8a8c1e6576115a5a4c76ff1dd519eff4e2cd",
+    "background": "f9a1a6a33c682a27dd2a8bf40ff361e0c9ceed52bbc7bd811db70694bef8664c",
+    "F": "976e6a52af3fd9fd8b8ef9a7a017cddb37fec6ebae961256c5b1134ad0cba59d",
+    "S": "9ee1264c492186058e9069b3ab5b86679690a0349363bcf970fc241251a2e159"
+  },
+  "visibleGeometry": {
+    "actualPersonDominantCoverageBBox": [
+      883,
+      114,
+      1350,
+      931
+    ],
+    "receiverDominantCoverageBBox": [
+      878,
+      532,
+      1393,
+      936
+    ]
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

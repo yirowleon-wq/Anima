@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "id": "sakiko-attention-violet-shared-page-included-v2",
+  "sceneFamily": "literary-room-v1",
+  "character": "sakiko",
+  "activity": "attention",
+  "purpose": "activity",
+  "light": "dusk",
+  "environmentVariant": "twilight",
+  "palette": "violet",
+  "width": 1536,
+  "height": 1024,
+  "mother": "sakiko-attention-violet-shared-page-included-v2-mother.png",
+  "background": "sakiko-attention-violet-shared-page-included-v2-background.png",
+  "mask": "sakiko-attention-violet-shared-page-included-v2-mask.png",
+  "maskMode": "luminance",
+  "contactMask": "sakiko-attention-violet-shared-page-included-v2-contact-mask.png",
+  "seat": [
+    0.7682291666666666,
+    0.5703125
+  ],
+  "ground": [
+    0.65625,
+    0.89453125
+  ],
+  "bodyBounds": [
+    0.5885416666666666,
+    0.1123046875,
+    0.8951822916666666,
+    0.90625
+  ],
+  "safeTextBoundary": 0.5625,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "58.854166666666664% 11.23046875%, 89.51822916666666% 11.23046875%, 89.51822916666666% 90.625%, 58.854166666666664% 90.625%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "69c14d7b7df22f634e3bc884c01396bdcd0d3f0fe70678803a05a10b52366208",
+      "background": "1aa2ca1254bcbb917cae56db6c09d1725f6b17d2f10d8b43b81189ea95068d6b",
+      "F": "5285f653e453905d38e5992bbd20cc46f54d0d390cd59308a1dc13dde11b5061",
+      "S": "89cf69bd67f18c81c4170e4897850cc0d7e88c896c815b2fa4c6bdc40ae4c967"
+    },
+    "geometryEvidence": {
+      "jointReceiverEnvelope": {
+        "sourcePixels": [
+          880,
+          115,
+          1375,
+          937
+        ],
+        "normalized": [
+          0.5729166666666666,
+          0.1123046875,
+          0.8951822916666666,
+          0.9150390625
+        ],
+        "basis": "sRGB Rec.709 luminance; F >32, S >32 and MAX(L(F),L(S)) >32 are read-only envelope metadata only. Original continuous ImageGen mask PNG bytes and runtime luminance are unchanged; no thresholded or hand-edited image is created."
+      },
+      "candidateSevenUnionPixels": [
+        762,
+        86,
+        1378,
+        955
+      ],
+      "candidateSevenProtectedPixels": [
+        666,
+        74,
+        1474,
+        967
+      ],
+      "candidateSevenProtectedHeight": 893,
+      "cameraFunctionModified": false
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/sakiko-attention-violet-shared-page-included-v2.json"
+  }
+}

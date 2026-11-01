@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "enabled": false,
+  "runtimeVersion": "local-semantic-ort1.30.0-tokenizers0.2.0-v1",
+  "modelId": "unconfigured",
+  "repository": null,
+  "revision": null,
+  "method": {
+    "architecture": "BertModel",
+    "dtype": "q8",
+    "dimensions": 512,
+    "maxTokens": 512,
+    "pooling": "cls",
+    "normalization": "l2",
+    "queryPrefix": "",
+    "documentPrefix": "",
+    "executionProvider": "cpu"
+  },
+  "dependencies": {
+    "onnxruntime-node": "1.30.0",
+    "onnxruntime-common": "1.30.0",
+    "@huggingface/tokenizers": "0.2.0"
+  },
+  "files": [],
+  "runtimeLicenseFiles": [],
+  "licenseSources": {}
+}

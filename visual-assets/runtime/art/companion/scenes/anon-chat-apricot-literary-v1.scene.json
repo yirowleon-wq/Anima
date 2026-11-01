@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "id": "anon-chat-apricot-literary-v1",
+  "sceneFamily": "literary-room-v1",
+  "character": "anon",
+  "activity": "chat",
+  "light": "morning",
+  "palette": "apricot",
+  "environmentVariant": "clear-day",
+  "width": 1536,
+  "height": 1024,
+  "mother": "anon-chat-apricot-literary-mother-v1.png",
+  "background": "literary-room-clear-day-v1.png",
+  "mask": "anon-chat-apricot-literary-figure-mask-v1.png",
+  "maskMode": "luminance",
+  "contactMask": "anon-chat-apricot-literary-contact-mask-v1.png",
+  "seat": [
+    0.546875,
+    0.537109375
+  ],
+  "ground": [
+    0.4427083333333333,
+    0.80078125
+  ],
+  "bodyBounds": [
+    0.3971354166666667,
+    0.10546875,
+    0.6119791666666666,
+    0.8125
+  ],
+  "safeTextBoundary": 0.36,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "39.71354166666667% 10.546875%, 61.197916666666664% 10.546875%, 61.197916666666664% 81.25%, 39.71354166666667% 81.25%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "53ee79ee3e5e210fc875d6ed062543c21cc2001831ede42dad814367a6103b7c",
+      "background": "f9a1a6a33c682a27dd2a8bf40ff361e0c9ceed52bbc7bd811db70694bef8664c",
+      "F": "c4aba1f3593f5255b56c2bdcf14873fc5400f8c9fc6e71f346df1c3f00cca0fd",
+      "S": "39b57bb13040463ed0d70a1403e8475100fc5974b5bae8d2e1ccca73c18dbc9c"
+    },
+    "geometryEvidence": {
+      "actualVisibleBodyEnvelope": [
+        0.3971354166666667,
+        0.10546875,
+        0.6119791666666666,
+        0.8125
+      ],
+      "FWholeCoverageDominantPixelBBox": [
+        612,
+        109,
+        937,
+        829
+      ],
+      "receiverCoverageDominantPixelBBox": [
+        608,
+        528,
+        1025,
+        837
+      ],
+      "knownIncludedMaterialNotBody": []
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/anon-chat-apricot-literary-v1.json"
+  }
+}

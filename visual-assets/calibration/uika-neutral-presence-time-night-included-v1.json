@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "scene": "uika-neutral-presence-time-night-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "7c53b03795295ddf3b7b490fe1332db82326a49dcace9fe9f6502b2cee5636d9",
+    "background": "0ee667d9b808402c52c22deca94209a429f33836d6f95a1285e3bad21683a7f8",
+    "F": "f1833c0423a5d8241c4e69f1a95101bc5643d89b18019f008b53a41ec146b539",
+    "S": "95be09b006d6811de4688ca14de32c4b1426d3aff54814d1d4518a253830c387"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        787,
+        96,
+        1343,
+        907
+      ],
+      "normalized": [
+        0.5123697916666666,
+        0.09375,
+        0.8743489583333334,
+        0.8857421875
+      ],
+      "basis": "Read-only original MAX(L(F),L(S)) >32 complete real source receiver envelope, never tightened."
+    },
+    "familyFramingCodeUnchanged": true,
+    "newJointReceiverFitsExistingFamilyOuterBounds": true
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

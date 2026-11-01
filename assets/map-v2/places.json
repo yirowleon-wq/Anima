@@ -1,0 +1,263 @@
+[
+  {
+    "id": "place/library",
+    "displayName": "Demo Library",
+    "aliases": [
+      "Library"
+    ],
+    "scope": "campus",
+    "kind": "building",
+    "coordinate": [
+      -0.0015,
+      0.002
+    ],
+    "bounds": [
+      -0.00178,
+      0.0015,
+      -0.00122,
+      0.00228
+    ],
+    "entrances": [
+      {
+        "id": "n/-0.0015/0.0015",
+        "structureId": "place/library",
+        "name": "Demo entrance",
+        "coordinate": [
+          -0.0015,
+          0.0015
+        ],
+        "connected": true,
+        "source": "anima:synthetic-campus"
+      }
+    ],
+    "accessCandidates": [
+      {
+        "id": "entrance/library",
+        "entranceId": "n/-0.0015/0.0015",
+        "nodeId": "n/-0.0015/0.0015",
+        "kind": "entrance",
+        "name": "Demo entrance",
+        "coordinate": [
+          -0.0015,
+          0.0015
+        ],
+        "coordinates": [
+          [
+            -0.0015,
+            0.0015
+          ]
+        ],
+        "meters": 0,
+        "source": "anima:synthetic-campus"
+      }
+    ],
+    "source": {
+      "url": "anima:synthetic-campus",
+      "version": 1
+    },
+    "geometryStatus": "mapped",
+    "heightM": 9,
+    "volumeBasis": "cartographic-proxy",
+    "modelBasis": "Synthetic demonstration only."
+  },
+  {
+    "id": "place/studio",
+    "displayName": "Demo Studio",
+    "aliases": [
+      "Studio"
+    ],
+    "scope": "campus",
+    "kind": "building",
+    "coordinate": [
+      0.002,
+      0
+    ],
+    "bounds": [
+      0.0015,
+      -0.00028,
+      0.00228,
+      0.00028
+    ],
+    "entrances": [
+      {
+        "id": "n/0.0015/0",
+        "structureId": "place/studio",
+        "name": "Demo entrance",
+        "coordinate": [
+          0.0015,
+          0
+        ],
+        "connected": true,
+        "source": "anima:synthetic-campus"
+      }
+    ],
+    "accessCandidates": [
+      {
+        "id": "entrance/studio",
+        "entranceId": "n/0.0015/0",
+        "nodeId": "n/0.0015/0",
+        "kind": "entrance",
+        "name": "Demo entrance",
+        "coordinate": [
+          0.0015,
+          0
+        ],
+        "coordinates": [
+          [
+            0.0015,
+            0
+          ]
+        ],
+        "meters": 0,
+        "source": "anima:synthetic-campus"
+      }
+    ],
+    "source": {
+      "url": "anima:synthetic-campus",
+      "version": 1
+    },
+    "geometryStatus": "mapped",
+    "heightM": 9,
+    "volumeBasis": "cartographic-proxy",
+    "modelBasis": "Synthetic demonstration only."
+  },
+  {
+    "id": "place/commons",
+    "displayName": "Demo Commons",
+    "aliases": [
+      "Commons"
+    ],
+    "scope": "campus",
+    "kind": "building",
+    "coordinate": [
+      0,
+      -0.002
+    ],
+    "bounds": [
+      -0.00028,
+      -0.00228,
+      0.00028,
+      -0.0015
+    ],
+    "entrances": [
+      {
+        "id": "n/0/-0.0015",
+        "structureId": "place/commons",
+        "name": "Demo entrance",
+        "coordinate": [
+          0,
+          -0.0015
+        ],
+        "connected": true,
+        "source": "anima:synthetic-campus"
+      }
+    ],
+    "accessCandidates": [
+      {
+        "id": "entrance/commons",
+        "entranceId": "n/0/-0.0015",
+        "nodeId": "n/0/-0.0015",
+        "kind": "entrance",
+        "name": "Demo entrance",
+        "coordinate": [
+          0,
+          -0.0015
+        ],
+        "coordinates": [
+          [
+            0,
+            -0.0015
+          ]
+        ],
+        "meters": 0,
+        "source": "anima:synthetic-campus"
+      }
+    ],
+    "source": {
+      "url": "anima:synthetic-campus",
+      "version": 1
+    },
+    "geometryStatus": "mapped",
+    "heightM": 9,
+    "volumeBasis": "cartographic-proxy",
+    "modelBasis": "Synthetic demonstration only."
+  },
+  {
+    "id": "place/unknown-hall",
+    "displayName": "Demo Unmapped Hall",
+    "aliases": [
+      "Unmapped Hall"
+    ],
+    "scope": "campus",
+    "kind": "building",
+    "coordinate": [
+      0.0026,
+      0.002
+    ],
+    "bounds": [
+      0.00232,
+      0.0017200000000000002,
+      0.0028799999999999997,
+      0.00228
+    ],
+    "entrances": [],
+    "accessCandidates": [],
+    "source": {
+      "url": "anima:synthetic-campus",
+      "version": 1
+    },
+    "geometryStatus": "mapped",
+    "heightM": 9,
+    "volumeBasis": "cartographic-proxy",
+    "modelBasis": "Synthetic demonstration only."
+  },
+  {
+    "id": "place/meadow",
+    "displayName": "Demo Meadow",
+    "aliases": [
+      "Meadow"
+    ],
+    "scope": "campus",
+    "kind": "landmark",
+    "coordinate": [
+      -0.0021,
+      -0.0015
+    ],
+    "bounds": [
+      -0.0021,
+      -0.0015,
+      -0.0021,
+      -0.0015
+    ],
+    "entrances": [],
+    "accessCandidates": [
+      {
+        "id": "estimate/meadow",
+        "nodeId": "n/-0.0015/-0.0015",
+        "kind": "estimate",
+        "name": "Demonstration access estimate",
+        "coordinate": [
+          -0.0015,
+          -0.0015
+        ],
+        "coordinates": [
+          [
+            -0.0021,
+            -0.0015
+          ],
+          [
+            -0.0015,
+            -0.0015
+          ]
+        ],
+        "meters": 66.717,
+        "source": "anima:synthetic-campus"
+      }
+    ],
+    "source": {
+      "url": "anima:synthetic-campus",
+      "version": 1
+    },
+    "geometryStatus": "reference-point"
+  }
+]

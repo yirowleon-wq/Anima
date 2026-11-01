@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "scene": "soyo-neutral-presence-time-night-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "82a918b778cbe9549572410ceba0c27af7c0e11d33f9f2ae14614a280e36d9b6",
+    "background": "4142e34426feb030bf4b471c084bb089850e4a8c28f44b01e96092781f46e90a",
+    "F": "0775f81ebda27f9294d1e08cc888d8a795f555e4aa02921e19f0bb821aa13e79",
+    "S": "2c5e517a2dfdf400f4e5b053fb30c96d6eaca52a6a52046fc0c1c31bf4e8b5cb"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        957,
+        100,
+        1342,
+        934
+      ],
+      "normalized": [
+        0.623046875,
+        0.09765625,
+        0.8736979166666666,
+        0.912109375
+      ],
+      "basis": "Read-only MAX(L(F),L(S)) >8 envelope including actual fixed local receiver; no contour contraction or alpha change."
+    },
+    "familyFramingCodeUnchanged": true
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

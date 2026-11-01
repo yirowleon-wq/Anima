@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:anima-map-audit:record:v1",
+  "title": "Audit record structural contract (not truth or acceptance validator)",
+  "type": "object",
+  "properties": {
+    "template_only": {
+      "type": "boolean"
+    },
+    "record_type": {
+      "enum": [
+        "feature",
+        "source",
+        "claim",
+        "issue",
+        "check",
+        "review",
+        "batch",
+        "decision"
+      ]
+    }
+  },
+  "required": [
+    "template_only",
+    "record_type"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "feature"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "template_only",
+          "record_type",
+          "feature_id",
+          "source_feature_ids",
+          "name",
+          "name_status",
+          "class",
+          "layer",
+          "zone_id",
+          "geometry",
+          "crs_chain_id",
+          "source_refs",
+          "claim_refs",
+          "confidence_by_property",
+          "source_conflicts",
+          "adopted_geometry_claim",
+          "relations",
+          "representation",
+          "style_token",
+          "owner_branch",
+          "unresolved_issue_ids",
+          "required_checks",
+          "check_refs",
+          "review_refs",
+          "status",
+          "dependency_fingerprint"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "source"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "template_only",
+          "record_type",
+          "source_id",
+          "name",
+          "product",
+          "layer_or_dataset",
+          "source_type",
+          "locator",
+          "captured_on",
+          "published_on",
+          "accessed_on",
+          "is_schematic",
+          "declared_crs",
+          "axis_order",
+          "unit",
+          "independent_lineage_group",
+          "spatial_accuracy",
+          "roles",
+          "alignment_id",
+          "rights"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "claim"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "template_only",
+          "record_type",
+          "claim_id",
+          "feature_id",
+          "property",
+          "candidates",
+          "decision",
+          "adopted_value",
+          "adopted_source_refs",
+          "source_locator",
+          "rejected_candidates_with_reasons",
+          "confidence",
+          "uncertainty",
+          "conflict_group",
+          "reason",
+          "reviewer",
+          "reviewed_at"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "issue"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "template_only",
+          "record_type",
+          "issue_id",
+          "rule_id",
+          "feature_ids",
+          "zone_ids",
+          "witness_locator",
+          "observed",
+          "root_cause_hypotheses",
+          "claim_refs",
+          "severity",
+          "state",
+          "owner",
+          "duplicate_of",
+          "handoff_to",
+          "fix_commit",
+          "closure_check_ids",
+          "severity_change_decision_id"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "check"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "template_only",
+          "record_type",
+          "check_id",
+          "rule_id",
+          "rule_version",
+          "implementation_hash",
+          "scope_query",
+          "expected_ids_locator",
+          "expected_ids_hash",
+          "input_versions",
+          "counts",
+          "command_or_steps",
+          "result",
+          "failures",
+          "not_applicable_with_reasons",
+          "executor",
+          "executed_at",
+          "result_locator"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "review"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "template_only",
+          "record_type",
+          "review_id",
+          "scope_id",
+          "member_ids_locator",
+          "membership_hash",
+          "sampling",
+          "view",
+          "input_versions",
+          "questions",
+          "observations",
+          "claim_refs",
+          "issues_created",
+          "not_reviewed",
+          "verdict",
+          "reviewer",
+          "reviewed_at"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "batch"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "template_only",
+          "record_type",
+          "batch_id",
+          "class",
+          "generator_locator",
+          "generator_hash",
+          "membership_locator",
+          "membership_hash",
+          "member_count",
+          "parameter_ranges",
+          "source_and_claim_refs",
+          "all_member_scan_check_ids",
+          "representative_extreme_boundary_sample_ids",
+          "random_sample",
+          "review_refs",
+          "systemic_issue_id",
+          "whole_class_escalated",
+          "status"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "decision"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "template_only",
+          "record_type",
+          "decision_id",
+          "type",
+          "related_ids",
+          "previous_value",
+          "proposed_value",
+          "new_evidence_refs",
+          "reason",
+          "impact_scope_locator",
+          "independent_reviewer",
+          "approval_authority",
+          "actual_approval_locator",
+          "approved_at",
+          "expires_or_invalidates_when",
+          "status"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": true
+}

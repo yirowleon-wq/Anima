@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "taki-neutral-presence-time-night-included-v1",
+  "sceneFamily": "literary-room-v1",
+  "character": "taki",
+  "activity": "chat",
+  "purpose": "neutral-presence",
+  "neutralTime": "night",
+  "light": "night",
+  "palette": "rain",
+  "width": 1536,
+  "height": 1024,
+  "mother": "taki-neutral-presence-time-night-included-v1-mother.png",
+  "background": "taki-neutral-presence-time-night-included-v1-background.png",
+  "mask": "taki-neutral-presence-time-night-included-v1-mask.png",
+  "maskMode": "luminance",
+  "contactMask": "taki-neutral-presence-time-night-included-v1-contact-mask.png",
+  "seat": [
+    0.791015625,
+    0.58203125
+  ],
+  "ground": [
+    0.6686197916666666,
+    0.888671875
+  ],
+  "bodyBounds": [
+    0.59375,
+    0.1025390625,
+    0.857421875,
+    0.8935546875
+  ],
+  "safeTextBoundary": 0.55,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "59.375% 10.25390625%, 85.7421875% 10.25390625%, 85.7421875% 89.35546875%, 59.375% 89.35546875%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "79aae6d833d537e9667f9ec77850fe00121aa886031ca3e2cba15ccc49401800",
+      "background": "bcd8d39e53d1be77b273612074968dc56c4e219ba34caa52389ecd5a72de993a",
+      "F": "3d9b95b66393cbc08755f73c1ebe43c131de5f2c51bb6259855df2b3e4d76625",
+      "S": "a4c080c247aa1470ba13a5583d0cbb3233c6275e894fffca92a7be52da09d5d5"
+    },
+    "geometryEvidence": {
+      "jointReceiverEnvelope": {
+        "sourcePixels": [
+          912,
+          105,
+          1335,
+          918
+        ],
+        "normalized": [
+          0.59375,
+          0.1025390625,
+          0.869140625,
+          0.896484375
+        ],
+        "basis": "Read-only MAX(L(F),L(S)) >8 envelope including actual fixed local receiver; no contour contraction or alpha change."
+      },
+      "familyFramingCodeUnchanged": true
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/taki-neutral-presence-time-night-included-v1.json"
+  }
+}

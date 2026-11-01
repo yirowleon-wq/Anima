@@ -1,0 +1,53 @@
+{
+  "schemaVersion": "campus-map/v2",
+  "version": "anima-synthetic-campus-v1",
+  "sourceDate": "2026-11-01",
+  "acquiredAt": "2026-11-01T00:00:00Z",
+  "bounds": [
+    -0.0035,
+    -0.003,
+    0.0035,
+    0.003
+  ],
+  "campusBounds": [
+    -0.0033,
+    -0.0027,
+    0.0033,
+    0.0027
+  ],
+  "label": "Synthetic campus demonstration",
+  "crs": "EPSG:4326",
+  "coordinateOrder": "longitude, latitude",
+  "renderProjection": "EPSG:3857",
+  "distance": "meters",
+  "dataKind": "synthetic",
+  "license": "Self-authored synthetic demonstration data; local review only",
+  "attribution": "Anima synthetic demonstration",
+  "source": "anima:synthetic-campus",
+  "copyright": "Anima project",
+  "buildings": 4,
+  "selectable": 5,
+  "entrances": 3,
+  "connectedEntrances": 3,
+  "routableBuildings": 3,
+  "nodes": 9,
+  "edges": 12,
+  "features": 18,
+  "rejected": {},
+  "limitations": [
+    "Synthetic geometry with no real-campus navigation claim.",
+    "Distances describe this diagram, not a measured journey.",
+    "No device location or university service is connected.",
+    "UCI navigation data requires a separately licensed dataset."
+  ],
+  "componentHashes": {
+    "geography.geojson": "7b3382bf3f14affe1523fbe79be99625da5bb56ea964707d5227617039ccb947",
+    "display-geography.geojson": "7b3382bf3f14affe1523fbe79be99625da5bb56ea964707d5227617039ccb947",
+    "places.json": "e6bf2066b12890636a9c95bae46dd9bf428194e75ef580636f3fdb63dfd761f6",
+    "network.json": "6cf63b13657556b74080f83bb8e20dfcd4b0849e3d2334ab4e78377930ee5ac0",
+    "shared-facts.json": "5df6938c98d63954f24a51de641400fc1f544aea63acf915732cb8a0fbe9012d",
+    "venues.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "sports-details.geojson": "c3311fccb903ee2126af2cf493ed98daa5daa7b7962f5344a25e397e46cbd3c4",
+    "building-supplement.json": "0dafa9b84463c52263be73856cd4e5f074dca7db8aed6628642cc5ddedb90da7"
+  }
+}

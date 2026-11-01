@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-resume-violet-literary-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "f336dd4689043b487411daa49d93ee83ce67fc670d01c971d42938ba84222973",
+    "background": "a05b00ade84a17de62e1f61813db70647dddd70f51f364a5bca3a486944c1327",
+    "F": "a4001631c77753fe3cc6643a8ffc5823c1b8b440756875aa56ca67065f6e2717",
+    "S": "763f3247f1bb48d3b0645d94b161c8c65f4668f0877675d981c02f1f57d2c09d"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        914,
+        124,
+        1328,
+        913
+      ],
+      "normalized": [
+        0.5950520833333334,
+        0.12109375,
+        0.8645833333333334,
+        0.8916015625
+      ],
+      "basis": "sRGB Rec.709 luminance; F >32, S >32 and MAX(L(F),L(S)) >32 are read-only envelope metadata only. Original continuous ImageGen mask PNG bytes and runtime luminance are unchanged; no thresholded or hand-edited image is created."
+    },
+    "candidateSevenUnionPixels": [
+      762,
+      86,
+      1378,
+      955
+    ],
+    "candidateSevenProtectedPixels": [
+      666,
+      74,
+      1474,
+      967
+    ],
+    "candidateSevenProtectedHeight": 893,
+    "cameraFunctionModified": false
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

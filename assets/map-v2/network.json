@@ -1,0 +1,226 @@
+{
+  "version": "anima-synthetic-campus-v1",
+  "nodes": [
+    {
+      "id": "n/-0.0015/-0.0015",
+      "coordinate": [
+        -0.0015,
+        -0.0015
+      ]
+    },
+    {
+      "id": "n/0/-0.0015",
+      "coordinate": [
+        0,
+        -0.0015
+      ]
+    },
+    {
+      "id": "n/0.0015/-0.0015",
+      "coordinate": [
+        0.0015,
+        -0.0015
+      ]
+    },
+    {
+      "id": "n/-0.0015/0",
+      "coordinate": [
+        -0.0015,
+        0
+      ]
+    },
+    {
+      "id": "n/0/0",
+      "coordinate": [
+        0,
+        0
+      ]
+    },
+    {
+      "id": "n/0.0015/0",
+      "coordinate": [
+        0.0015,
+        0
+      ]
+    },
+    {
+      "id": "n/-0.0015/0.0015",
+      "coordinate": [
+        -0.0015,
+        0.0015
+      ]
+    },
+    {
+      "id": "n/0/0.0015",
+      "coordinate": [
+        0,
+        0.0015
+      ]
+    },
+    {
+      "id": "n/0.0015/0.0015",
+      "coordinate": [
+        0.0015,
+        0.0015
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "e/0",
+      "from": "n/-0.0015/-0.0015",
+      "to": "n/0/-0.0015",
+      "meters": 166.7925,
+      "way": "path/h/-0.0015",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/1",
+      "from": "n/0/-0.0015",
+      "to": "n/0.0015/-0.0015",
+      "meters": 166.7925,
+      "way": "path/h/-0.0015",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/2",
+      "from": "n/-0.0015/0",
+      "to": "n/0/0",
+      "meters": 166.7925,
+      "way": "path/h/0",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/3",
+      "from": "n/0/0",
+      "to": "n/0.0015/0",
+      "meters": 166.7925,
+      "way": "path/h/0",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/4",
+      "from": "n/-0.0015/0.0015",
+      "to": "n/0/0.0015",
+      "meters": 166.7925,
+      "way": "path/h/0.0015",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/5",
+      "from": "n/0/0.0015",
+      "to": "n/0.0015/0.0015",
+      "meters": 166.7925,
+      "way": "path/h/0.0015",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/6",
+      "from": "n/-0.0015/-0.0015",
+      "to": "n/-0.0015/0",
+      "meters": 166.7925,
+      "way": "path/v/-0.0015",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/7",
+      "from": "n/-0.0015/0",
+      "to": "n/-0.0015/0.0015",
+      "meters": 166.7925,
+      "way": "path/v/-0.0015",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/8",
+      "from": "n/0/-0.0015",
+      "to": "n/0/0",
+      "meters": 166.7925,
+      "way": "path/v/0",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/9",
+      "from": "n/0/0",
+      "to": "n/0/0.0015",
+      "meters": 166.7925,
+      "way": "path/v/0",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/10",
+      "from": "n/0.0015/-0.0015",
+      "to": "n/0.0015/0",
+      "meters": 166.7925,
+      "way": "path/v/0.0015",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    },
+    {
+      "id": "e/11",
+      "from": "n/0.0015/0",
+      "to": "n/0.0015/0.0015",
+      "meters": 166.7925,
+      "way": "path/v/0.0015",
+      "name": "Demo Walk",
+      "stairs": false,
+      "bridge": false,
+      "gate": false,
+      "oneway": false,
+      "foot": "yes"
+    }
+  ]
+}

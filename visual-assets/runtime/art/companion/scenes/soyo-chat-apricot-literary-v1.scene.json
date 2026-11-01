@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "id": "soyo-chat-apricot-literary-v1",
+  "sceneFamily": "literary-room-v1",
+  "character": "soyo",
+  "activity": "chat",
+  "light": "morning",
+  "palette": "apricot",
+  "environmentVariant": "clear-day",
+  "width": 1536,
+  "height": 1024,
+  "mother": "soyo-chat-apricot-literary-mother-v1.png",
+  "background": "literary-room-clear-day-v1.png",
+  "mask": "soyo-chat-apricot-literary-figure-mask-v1.png",
+  "maskMode": "luminance",
+  "contactMask": "soyo-chat-apricot-literary-contact-mask-v1.png",
+  "seat": [
+    0.6770833333333334,
+    0.576171875
+  ],
+  "ground": [
+    0.5403645833333334,
+    0.8447265625
+  ],
+  "bodyBounds": [
+    0.4869791666666667,
+    0.1025390625,
+    0.7473958333333334,
+    0.8642578125
+  ],
+  "safeTextBoundary": 0.46,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "48.69791666666667% 10.25390625%, 74.73958333333334% 10.25390625%, 74.73958333333334% 86.42578125%, 48.69791666666667% 86.42578125%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "20942d064ae0af479ede2868d689e105433022e8c0448d45301bd7fc9301bfd8",
+      "background": "f9a1a6a33c682a27dd2a8bf40ff361e0c9ceed52bbc7bd811db70694bef8664c",
+      "F": "5ba1a554039012e7bf744e028f18a4c16b335a6e12a8bbf426b2e371e6578200",
+      "S": "f170ba21bfff70b2db41ef2fa559318f70f1994556dd85253825cc3ec7ee0c90"
+    },
+    "geometryEvidence": {
+      "actualVisibleBodyEnvelope": [
+        0.4869791666666667,
+        0.1025390625,
+        0.7473958333333334,
+        0.8642578125
+      ],
+      "FWholeCoverageDominantPixelBBox": [
+        751,
+        105,
+        1138,
+        876
+      ],
+      "receiverCoverageDominantPixelBBox": [
+        743,
+        535,
+        1124,
+        880
+      ],
+      "knownIncludedMaterialNotBody": []
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/soyo-chat-apricot-literary-v1.json"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-chat-violet-literary-complete-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "3115fb3058cff052bddc376d4612aa842c96925e6708a809b434097980274b84"
+  },
+  "visibleGeometry": {},
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

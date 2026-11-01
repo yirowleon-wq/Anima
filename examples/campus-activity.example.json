@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "anima-campus-activity/v1",
+  "institutionId": "example-university",
+  "source": "Synthetic editable example; not personal or official records",
+  "fetchedAt": "2026-11-01T00:00:00Z",
+  "timeZone": "America/Los_Angeles",
+  "resources": {
+    "exercise": { "kind": "records", "complete": false, "data": [] },
+    "events": { "kind": "catalog", "complete": false, "data": [] },
+    "venues": { "kind": "catalog", "complete": false, "data": [] }
+  }
+}

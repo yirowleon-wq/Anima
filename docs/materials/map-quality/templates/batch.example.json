@@ -1,0 +1,26 @@
+{
+  "template_only": true,
+  "record_type": "batch",
+  "batch_id": "__UNSET__",
+  "class": null,
+  "generator_locator": null,
+  "generator_hash": null,
+  "membership_locator": null,
+  "membership_hash": null,
+  "member_count": null,
+  "parameter_ranges": {},
+  "source_and_claim_refs": [],
+  "all_member_scan_check_ids": [],
+  "representative_extreme_boundary_sample_ids": [],
+  "random_sample": {
+    "seed": null,
+    "ids": [],
+    "target_detection_probability": null,
+    "defect_rate_threshold": null,
+    "unsampled_count": null
+  },
+  "review_refs": [],
+  "systemic_issue_id": null,
+  "whole_class_escalated": false,
+  "status": "NOT_REVIEWED"
+}

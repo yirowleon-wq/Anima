@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-neutral-reading-time-day-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "35a318faaab82305b4a5f28e4f109701986e7ce75b312536835216306c2945af",
+    "background": "ff438a04b35a7a3a86b21b1cb21f11534b1a991dcb32bf2033ff6ad3de0ecb67",
+    "F": "99a56c9ea69b540f06427070203306b9c93417b1e5c92e3bb43a55f69fc20b39",
+    "S": "31be1a964933513b6e5199f0656d145bcdc0866fc248179ea0ce3a34b08ba204"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        801,
+        157,
+        1346,
+        928
+      ],
+      "normalized": [
+        0.521484375,
+        0.1533203125,
+        0.8763020833333334,
+        0.90625
+      ],
+      "basis": "Read-only MAX(L(F),L(S)) >32 envelope, including fixed original local receiver material."
+    },
+    "familyFramingUnchanged": true
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

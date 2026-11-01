@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "anima-campus-data/v1",
+  "institutionId": "example-university",
+  "termId": "2026-fall",
+  "timeZone": "America/Los_Angeles",
+  "source": "Synthetic example for editing; not personal or official university records",
+  "fetchedAt": "2026-11-01T00:00:00Z",
+  "complete": false,
+  "coverage": {
+    "classes": { "complete": false, "note": "An example does not establish a complete personal schedule." },
+    "grades": { "complete": false, "note": "No personal transcript is supplied." }
+  },
+  "resources": { "classes": [], "courses": [], "exams": [], "grades": [], "terms": [] },
+  "gradingPolicy": {
+    "id": "uci-undergraduate-2026-27-reference",
+    "source": "https://catalogue.uci.edu/informationforadmittedstudents/academicregulationsandprocedures/",
+    "scaleMax": 4,
+    "gradePoints": { "A+": 4, "A": 4, "A-": 3.7, "B+": 3.3, "B": 3, "B-": 2.7, "C+": 2.3, "C": 2, "C-": 1.7, "D+": 1.3, "D": 1, "D-": 0.7, "F": 0 },
+    "excluded": ["P", "NP", "S", "U", "NR", "IP", "I", "W"],
+    "repeatPolicy": "source_explicit"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "scene": "nyamu-chat-apricot-literary-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "096bd7f5f0138e8b961c91d52dc8e68b29bcda1600bbb9ca444bd1c7eff75313",
+    "background": "f9a1a6a33c682a27dd2a8bf40ff361e0c9ceed52bbc7bd811db70694bef8664c",
+    "F": "e134398076c27e95c17d8ffdf20bdeac59a0107924bd5edc2cdde1ad885ca6ff",
+    "S": "0702dd3af004fefa908aad843e906e17e30738fad28acb0df1143723059f71db"
+  },
+  "visibleGeometry": {
+    "bodyEnvelope": [
+      0.520833,
+      0.097656,
+      0.904948,
+      0.898438
+    ],
+    "FWholeCoverageDominantPixelBBox": [
+      825,
+      106,
+      1369,
+      906
+    ],
+    "receiverCoverageDominantPixelBBox": [
+      820,
+      549,
+      1461,
+      914
+    ]
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

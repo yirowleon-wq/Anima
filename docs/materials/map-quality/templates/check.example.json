@@ -1,0 +1,28 @@
+{
+  "template_only": true,
+  "record_type": "check",
+  "check_id": "__UNSET__",
+  "rule_id": null,
+  "rule_version": null,
+  "implementation_hash": null,
+  "scope_query": null,
+  "expected_ids_locator": null,
+  "expected_ids_hash": null,
+  "input_versions": {},
+  "counts": {
+    "expected": null,
+    "pass": null,
+    "fail": null,
+    "blocked": null,
+    "error": null,
+    "not_applicable": null,
+    "unchecked": null
+  },
+  "command_or_steps": null,
+  "result": "NOT_RUN",
+  "failures": [],
+  "not_applicable_with_reasons": [],
+  "executor": null,
+  "executed_at": null,
+  "result_locator": null
+}

@@ -1,0 +1,1356 @@
+import { createHash, randomUUID } from 'node:crypto';
+import * as z from 'zod';
+import { HarnessError, personalLabel, type ScopeHandle, type WorkRecord } from '../../shared/harness';
+import type { KernelRepository } from '../storage/repository';
+import type { PolicyKernel } from './policy';
+import type { WorkService } from './work';
+import type { BasisService } from './basis';
+import type { CooperationService, HelpContactEvent } from './cooperation';
+import type { ReminderRuntime } from '../actions/reminders';
+import type { CapabilityBroker } from '../capabilities/broker';
+import { canonical } from './semantics';
+import { planningMaterialProvenanceSchema, type PlanningMaterialProvenance } from '../actions/planning-intent-contract';
+import type { InvestigationFrontierService, InvestigationSession } from './investigation-frontier';
+import type { InteractionPreferences } from '../../shared/interaction';
+import { sceneRefSchema, type SceneRef, type SceneSnapshot } from '../../shared/scenes';
+import type { DomainChange } from '../storage/domains';
+import { addDate, dateInZone } from './semantics';
+import { campusQueryGrants, campusQueryInput, campusResources, validateCampusQuery } from '../capabilities/campus-query';
+import { attentionListInput, attentionChangeInput, type AttentionControlItem, type AttentionControlPage, type AttentionChangeInput } from '../../shared/attention-control';
+import { resolveSourceQuote, type SourceQuoteInput } from './source-quote';
+import { noteSourceProofSchema, type NoteSourceProof } from '../../shared/notes-source';
+import { workoutObservationSources, workoutSourceObjectId, workoutSourceProofSchema } from '../../shared/workout-source';
+
+const id = z.string().min(1).max(160);
+const helpDiscoveryStatuses = ['candidate', 'waiting', 'prepared', 'question_ready', 'notification_queued', 'paused', 'stale', 'expired', 'declined'] as const;
+export const helpDiscoveryInput = z.object({
+  id: id.optional(),
+  expectedRevision: z.number().int().positive().optional().describe("Preserve the exact revision when rereading the preparation selected in the UI; do not silently substitute another version after changes."),
+  helpRecordId: id.optional().describe("The original help record of the selected preparation; reread with id and expectedRevision rather than matching titles."),
+  query: z.string().max(400).optional().describe("Find words in currently readable opportunity titles and prepared bodies. Whitespace-separated terms match any term. Rephrase after a miss, or omit query to browse pages; a miss does not establish absence."),
+  relatedTo: id.optional().describe("The exact ID of a known matter or entrusted request; recover preparation through actual links rather than title similarity."),
+  statuses: z.array(z.enum(helpDiscoveryStatuses)).min(1).max(helpDiscoveryStatuses.length).optional().describe("Omission discovers only active opportunities and preparation. Paused, invalid, expired, or set-aside records can be explicitly inspected but are not currently usable material."),
+  from: z.string().datetime({ offset: true }).optional().describe("Inclusive start of the latest assessment time, or creation time if not assessed. This is not the calendar date discussed by the material."),
+  to: z.string().datetime({ offset: true }).optional().describe("Exclusive end of the latest assessment time, or creation time if not assessed."),
+  offset: z.number().int().nonnegative().default(0),
+  limit: z.number().int().min(1).max(12).default(5),
+}).strict().superRefine((input, context) => {
+  if ((input.expectedRevision !== undefined || input.helpRecordId) && !input.id)
+    context.addIssue({ code: 'custom', path: ['id'], message: "Revision and help record apply only to rereading the original preparation identified by id." });
+  if (input.from && input.to && Date.parse(input.from) >= Date.parse(input.to))
+    context.addIssue({ code: 'custom', path: ['to'], message: "End time must follow start time." });
+  if (input.id && (input.query !== undefined || input.relatedTo || input.statuses || input.from || input.to))
+    context.addIssue({ code: 'custom', path: ['id'], message: "Use id for an exact read; omit id when discovering with filters." });
+});
+const citation = z.object({
+  eventId: id.optional().describe("Usually omit: the host binds quote to the unique current original user statement. If supplied, use the exact current identifier, never a historical or guessed source ID."),
+  quote: z.string().min(1).max(3000).describe("A continuous exact passage in the person's current body, retaining relevant negation, conditions, and duration. Host references and prior context may inform interpretation; the source address remains in the person's original text."),
+  contentVersion: z.number().int().positive().optional().describe("For an explicit position, provide the actual original revision together with start/end. An outdated position is not searched again."),
+  start: z.number().int().nonnegative().optional().describe("Absolute Unicode code-point start of quote in the original. Repeated quotations need an exact range or a longer unique exact quote."),
+  end: z.number().int().positive().optional().describe("Exclusive Unicode code-point end in the same original."),
+}).strict().superRefine((source, context) => {
+  if (['contentVersion', 'start', 'end'].some(field => Object.hasOwn(source, field))
+    && (source.contentVersion === undefined || source.start === undefined || source.end === undefined || source.end <= source.start))
+    context.addIssue({ code: 'custom', path: ['start'], message: "An exact source position needs complete contentVersion/start/end, with end after start. Do not ignore an incomplete position and search the quotation again." });
+});
+export const attentionControlInput = z.object({
+  operation: z.enum(['follow', 'revise', 'pause', 'once', 'avoid', 'stop', 'resume', 'feedback', 'read']),
+  targetId: id.optional(), expectedRevision: z.number().int().positive().optional(),
+  source: citation.optional(), title: z.string().min(1).max(160).optional(),
+  rule: z.string().min(1).max(1200).optional().describe("The content governed by this restriction. Save restrictions with different scopes or durations separately rather than putting a whole sentence into one expiry record."), until: z.string().datetime({ offset: true }).nullable().optional().describe("Expiry belonging only to this control. Use null for stopping an initiative reason without an explicit end. Ambiguous temporal attachment does not resume initiative automatically or borrow another temporary pause's expiry."),
+  eventCategory: z.string().min(1).max(80).optional().describe("Use all for broad attention. Specific categories are dependency hints; new source changes without existing links still go to the main model for judgment."),
+  sources: z.array(id).max(8).optional().describe("Stable sourceId values needed for the future entrusted work, from actual reads or currently admitted sources. A note source is notes:self; note.source.via describes its authoring entry rather than source ID. Cover the later agreement, not merely the first change or probe. Express specific objects and meaning in rule. Visible sources and the person's limits jointly determine scope."), channel: z.enum(['in_app', 'local_notification']).optional(),
+  wakeAt: z.array(z.string().datetime({ offset: true })).max(16).optional().describe("A known opening, class end, or last-action instant to reassess even without source updates."),
+  probe: z.object({ capability: z.string().max(100), arguments: z.record(z.string(), z.json()), relativeDate: z.object({ argument: z.string().min(1).max(80), offsetDays: z.number().int().min(-1).max(365), timeZone: z.string().max(80) }).strict().optional() }).strict().optional(),
+}).strict();
+export const helpDecisionInput = z.object({
+  id, expectedRevision: z.number().int().positive(),
+  choice: z.enum(['prepare', 'wait', 'ask', 'notify', 'none']),
+  reason: z.string().min(1).max(1600), actionDescription: z.string().min(1).max(600),
+  sourceToolCallIds: z.array(id).max(12).optional().describe("observationId/toolCallId from an actual query in this round. Capability descriptions, inspect_help, and failed results are not new material."),
+  basisIds: z.array(id).max(12).optional().describe("Only still-valid basis-use record IDs from inspect_help.basisUses. Use an empty array when none were used, never original-statement or tool-call IDs."),
+  materialEvidenceIds: z.array(id).max(12).optional().describe("External material IDs actually supplied in opportunity.evidenceIds; not tool-call IDs or the user's permission to watch."),
+  reuseArtifact: z.boolean().optional(),
+  presentInConversation: z.boolean().optional().describe("Foreground prepare/ask only: bind verified material to real presentation in the current chat. Background work may choose notify only if the original request permits contact now; in_app uses the original conversation, local_notification the agreed OS channel. prepare remains quiet. displayed is recorded only after real rendering."),
+  artifact: z.object({ title: z.string().min(1).max(160), body: z.string().min(1).max(12000), sceneRefs: z.array(sceneRefSchema).max(3).optional() }).strict().optional(),
+  newValue: z.object({ explanation: z.string().min(1).max(1200), evidenceIds: z.array(id).min(1).max(8).describe("Actual external material IDs or obtained query IDs in sourceToolCallIds supporting new value. The user's permission is not new information.") }).strict().optional(),
+  reconsiderAt: z.string().datetime({ offset: true }).optional(),
+  duplicateOf: id.optional(),
+}).strict();
+export interface HelpSignal {
+  bindingId: string; watchId: string; evidenceId: string; category: string;
+  title: string; facts: Record<string, unknown>; noveltyKey: string; expiresAt: string;
+}
+const activeChoices = ['candidate', 'waiting', 'prepared', 'question_ready', 'notification_queued'];
+interface MaterialVersion { kind: 'agenda' | 'work' | 'domain'; id: string; revision: number; sourceId?: string; domain?: string; institutionId?: string; termId?: string; state?: 'present' | 'done' | 'deleted' }
+interface MaterialWake { at: string; opportunityId: string; opportunityRevision: number; objectId?: string; kind?: 'wait'; reconsiderAt?: string }
+interface MaterialObservation { tool: string; result: unknown; toolCallId?: string; requestedArguments?: unknown }
+export interface HelpArtifactAuthor { name: string; personaRevision: number }
+
+/** One attention decision for all capabilities. Signals cannot notify. Only
+ * the responsible assistant may choose value; the host enforces scope and time. */
+export class AttentionService {
+  resumeChanges?: (handle: ScopeHandle) => void;
+  constructor(readonly repo: KernelRepository, readonly policy: PolicyKernel, readonly work: WorkService,
+    readonly basis: BasisService, readonly cooperation: CooperationService, readonly reminders: ReminderRuntime,
+    readonly broker: CapabilityBroker, private preferences?: () => InteractionPreferences, private investigation?: InvestigationFrontierService) {
+    this.cooperation.onContact = (handle, record, event) => this.consumeOnce(handle, record, event);
+  }
+
+  private onceUse(rule: WorkRecord) {
+    const value = rule.data.onceUse;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    return typeof value.at === 'string' && ['displayed', 'opened', 'conversation_published', 'submitted_to_os', 'provider_delivered', 'seen', 'submission_started', 'unknown'].includes(String(value.event))
+      ? value as { at: string; event: HelpContactEvent } : undefined;
+  }
+  private pendingContact(event: HelpContactEvent | undefined) { return event === 'submission_started' || event === 'unknown'; }
+  private onceEvent(rule: WorkRecord, contacts: WorkRecord[]) {
+    if (rule.data.operation !== 'once') return;
+    const prior = this.onceUse(rule)?.event;
+    if (prior && !this.pendingContact(prior)) return prior;
+    const actual = contacts.filter(help => !rule.data.targetOpportunityId || help.data.opportunityId === rule.data.targetOpportunityId)
+      .map(help => this.contactEvent(help)).filter((event): event is HelpContactEvent => !!event);
+    return actual.find(event => !this.pendingContact(event)) || prior || actual[0];
+  }
+  private onceHeld(rule: WorkRecord, contacts: WorkRecord[]) {
+    return !!this.onceEvent(rule, contacts) || this.onceCoverageUnknown(rule, contacts);
+  }
+  private onceCoverageUnknown(rule: WorkRecord, contacts: WorkRecord[]) {
+    return rule.data.operation === 'once' && rule.data.onceContractVersion !== 1 && !this.onceEvent(rule, contacts);
+  }
+  private seedOnce(handle: ScopeHandle, contacts: WorkRecord[]) {
+    for (const help of contacts) {
+      const event = this.contactEvent(help);
+      if (event) this.consumeOnce(handle, help, event);
+    }
+  }
+  private contactEvent(record: WorkRecord): HelpContactEvent | undefined {
+    return record.data.seenAt ? 'seen' : record.data.displayedAt ? 'displayed' : record.data.openedAt ? 'opened'
+      : record.data.conversationPublishedAt ? 'conversation_published' : record.data.deliveredAt ? 'provider_delivered'
+        : record.data.submittedAt ? 'submitted_to_os' : record.data.deliveryUnknownAt ? 'unknown'
+          : record.data.deliveryAttemptedAt ? 'submission_started' : undefined;
+  }
+  private consumeOnce(handle: ScopeHandle, help: WorkRecord, event: HelpContactEvent) {
+    const opportunityId = typeof help.data.opportunityId === 'string' ? help.data.opportunityId : undefined;
+    const opportunity = opportunityId ? this.repo.work(handle, undefined, opportunityId)[0] : undefined;
+    const objectId = (opportunity?.data.facts as { objectId?: string } | undefined)?.objectId;
+    for (const rule of this.rules(handle, String(help.data.matterId), objectId, opportunityId)) {
+      if (rule.data.operation !== 'once') continue;
+      const previous = this.onceUse(rule);
+      if (previous && (!this.pendingContact(previous.event) || this.pendingContact(event))) continue;
+      // This is a channel/exposure receipt on the existing rule, not a new
+      // instruction revision. It deliberately carries no private help body,
+      // source copy or renewed authority after that body is forgotten.
+      this.repo.db.prepare(`UPDATE h_work SET payload=json_set(payload,'$.data.onceUse',json(?))
+        WHERE id=? AND revision=? AND status='active' AND json_extract(payload,'$.data.operation')='once'`)
+        .run(JSON.stringify({ event, at: help.data[{
+          displayed: 'displayedAt', opened: 'openedAt', conversation_published: 'conversationPublishedAt',
+          submitted_to_os: 'submittedAt', provider_delivered: 'deliveredAt', seen: 'seenAt',
+          submission_started: 'deliveryAttemptedAt', unknown: 'deliveryUnknownAt',
+        }[event]] || this.repo.clock.now() }), rule.id, rule.revision);
+    }
+  }
+
+  quietOptional() {
+    // Waiting for the person to speak changes delivery, not their mandate.
+    // Keep prepared work and unreviewed changes; followup controls whether
+    // continuing investigation is wanted at all.
+    this.keepPreparedInApp();
+  }
+  keepPreparedInApp() {
+    const scope = this.policy.hostScope();
+    for (const record of this.records(scope, 'help_opportunity', ['notification_queued'])) {
+      this.reminders.cancel(record.id);
+      this.work.update(scope, record.id, record.revision, { status: record.data.artifact ? 'prepared' : 'waiting', data: { ...record.data, choice: record.data.artifact ? 'prepare' : 'wait', notificationSuppressedBy: 'in_app_preference' } });
+    }
+  }
+
+  canNotify(id: string) {
+    this.expire();
+    const preferences = this.preferences?.();
+    if (preferences && (preferences.initiative !== 'when_useful' || preferences.followup === 'on_request')) return false;
+    const scope = this.policy.hostScope(), record = this.repo.work(scope, undefined, id)[0];
+    // The mandate's selected channel survives queueing. A conversation-only
+    // publication cannot acquire OS permission from the global notice switch.
+    if (!record || record.data.type !== 'help_opportunity' || record.status !== 'notification_queued'
+      || record.data.channel !== 'local_notification') return false;
+    const rules = this.rules(scope, String(record.data.bindingId), String((record.data.facts as any)?.objectId || ''), record.id);
+    if (rules.some(rule => ['pause', 'stop'].includes(String(rule.data.operation)))) return false;
+    const contacts = this.cooperation.interventions(scope, String(record.data.bindingId));
+    this.seedOnce(scope, contacts);
+    if (rules.some(rule => this.onceHeld(rule, contacts))) {
+      this.work.update(scope, record.id, record.revision, { status: 'prepared', data: { ...record.data, choice: 'prepare', notificationSuppressedBy: 'once_contact_recorded' } });
+      return false;
+    }
+    // A queued decision can become redundant before dispatch. Real display or
+    // opening is observed after generation and must be checked at this boundary.
+    const exposed = contacts.find(help =>
+      (help.id === record.data.helpRecordId || help.data.basisFingerprint === record.data.fingerprint) &&
+      this.contactEvent(help));
+    if (exposed) {
+      this.work.update(scope, record.id, record.revision, { status: 'prepared', data: { ...record.data, choice: 'prepare',
+        notificationSuppressedBy: this.pendingContact(this.contactEvent(exposed)) ? 'prior_delivery_unknown' : 'already_exposed' } });
+      return false;
+    }
+    return true;
+  }
+
+  migrateLegacyWatches() {
+    if (this.repo.getMeta('life_watch_migration_v1', false)) return;
+    const rows = this.repo.db.prepare(`SELECT j.id,j.object_id,j.payload,j.status,w.id AS watch_id,w.goal_id,w.payload AS watch_payload
+      FROM h_jobs j JOIN h_watches w ON substr(j.object_id,1,length(w.id)+1)=w.id||':'
+      WHERE w.owner=? AND w.workspace=? AND j.kind='reminder' AND j.status IN ('queued','leased')`).all(this.repo.identity.principalId, this.repo.identity.workspaceId);
+    this.repo.write(() => {
+      for (const row of rows) {
+        const scope = this.policy.hostScope(), watch = JSON.parse(String(row.watch_payload));
+        const evidence = this.repo.dependencies(String(row.object_id)).map(dependency => this.repo.evidence(scope, dependency.producerId)).find(Boolean);
+        if (evidence && Date.parse(watch.actionableUntil) > Date.parse(this.repo.clock.now())) this.offer(scope, {
+          bindingId: String(row.goal_id), watchId: String(row.watch_id), evidenceId: evidence.id, category: String(watch.eventCategory), title: String(watch.title),
+          facts: { legacySignal: true, originalConditionsNeedRecheck: true }, noveltyKey: String(row.object_id), expiresAt: String(watch.actionableUntil),
+        });
+        // Never reinterpret an ordinary user-created reminder as optional.
+        // Only exact legacy watch-owned identities are migrated here.
+        this.repo.db.prepare("UPDATE h_jobs SET status='superseded',fence=fence+1,lease_until=NULL WHERE id=?").run(String(row.id));
+      }
+      this.repo.setMeta('life_watch_migration_v1', { at: this.repo.clock.now(), migrated: rows.length });
+    });
+  }
+
+  /** A paged native management projection, separate from model context and material reads. */
+  nativeList(handle: ScopeHandle, raw: unknown = {}): AttentionControlPage {
+    const input = attentionListInput.parse(raw || {});
+    this.policy.require(handle, 'evidence:read');
+    const management = this.managementScope(handle), scope = this.policy.validate(handle);
+    const records = this.repo.db.prepare(`SELECT id,revision,status FROM h_work WHERE owner=? AND workspace=? AND subject=?
+      AND world='real' AND audience='self' AND source='work:self'
+      AND json_extract(payload,'$.data.type') IN ('attention_focus','attention_rule') ORDER BY rowid DESC`)
+      .all(scope.principalId, scope.workspaceId, scope.principalId);
+    const version = createHash('sha256').update(canonical({ records, epoch: this.repo.epoch, policy: this.repo.policyRevision,
+      sources: [...scope.sources].sort(), grants: [...scope.grants].sort() })).digest('hex');
+    let offset = 0;
+    if (input.cursor) {
+      let cursor: { offset: number; version: string };
+      try {
+        cursor = z.object({ offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), version: z.string() }).strict()
+          .parse(JSON.parse(Buffer.from(input.cursor, 'base64url').toString('utf8')));
+      } catch { throw new HarnessError('invalid_page', "This page position could not be recovered. Reopen the list."); }
+      if (cursor.version !== version) throw new HarnessError('attention_list_changed', "These matters changed. Reopen the list.");
+      offset = cursor.offset;
+    }
+    const page = this.repo.workData(management, ['attention_focus'], { limit: input.limit + 1, offset });
+    return { items: page.slice(0, input.limit).map(focus => this.nativeView(handle, focus)),
+      nextCursor: page.length > input.limit ? Buffer.from(JSON.stringify({ offset: offset + input.limit, version })).toString('base64url') : null };
+  }
+
+  nativeItem(handle: ScopeHandle, focusId: string): AttentionControlItem {
+    this.policy.require(handle, 'evidence:read');
+    const focus = this.repo.workData(this.managementScope(handle, focusId), ['attention_focus'], { id: focusId, limit: 1 })[0];
+    if (!focus) throw new HarnessError('attention_missing', "This matter is no longer here. Reopen the list.");
+    return this.nativeView(handle, focus);
+  }
+
+  private nativeView(handle: ScopeHandle, focus: WorkRecord): AttentionControlItem {
+    const scope = this.policy.validate(handle), rules = this.rules(handle, focus.id), now = Date.parse(this.repo.clock.now());
+    const sources = Array.isArray(focus.data.sources) ? focus.data.sources.filter((source): source is string => typeof source === 'string') : [];
+    const sourceBoundary = Array.isArray(focus.data.sourceBoundary) ? focus.data.sourceBoundary.filter((source): source is string => typeof source === 'string') : sources;
+    const parent = typeof focus.data.matterId === 'string' ? this.repo.work(this.managementScope(handle), undefined, focus.data.matterId)[0] : undefined;
+    const required = new Set<string>(sources.map(source => source === 'map:local' ? 'map:read' : source === 'weather:open-meteo' ? 'weather:read'
+      : source === 'profile:self' ? 'memory:read' : source.startsWith('campus:') ? 'campus:read' : 'evidence:read'));
+    const probe = focus.data.probe as { capability?: string } | null;
+    if (probe?.capability) for (const grant of this.broker.describe(probe.capability)?.requiredScopes || []) required.add(grant);
+    const permissionCurrent = this.focusPermissionCurrent(focus);
+    const grantsPresent = sources.every(source => scope.sources.includes(source)) && [...required].every(grant => scope.grants.includes(grant));
+    const permitted = grantsPresent && permissionCurrent;
+    const availableSources = sourceBoundary.filter(source => scope.sources.includes(source) && scope.grants.includes(source === 'map:local' ? 'map:read' : source === 'weather:open-meteo' ? 'weather:read'
+      : source === 'profile:self' ? 'memory:read' : source.startsWith('campus:') ? 'campus:read' : 'evidence:read')
+      && this.focusPermissionCurrent({ ...focus, data: { ...focus.data, sources: [source], probe: null } })
+      && (parent?.data.type !== 'attention_focus' || (parent.data.sources as string[]).includes(source)));
+    const until = typeof focus.data.until === 'string' ? focus.data.until : null;
+    const expired = focus.status === 'expired' || !!until && Date.parse(until) <= now;
+    const ended = focus.status !== 'active' || rules.some(rule => rule.data.operation === 'stop');
+    const activeParent = this.bindingActive(this.managementScope(handle), focus);
+    const pauses = rules.filter(rule => rule.data.operation === 'pause');
+    const status: AttentionControlItem['status'] = expired ? 'expired' : ended ? 'ended' : pauses.length ? 'paused'
+      : !permitted || !activeParent ? 'unavailable' : 'active';
+    const controlVersion = createHash('sha256').update(canonical({ focus: { id: focus.id, revision: focus.revision, status: focus.status },
+      rules: rules.map(rule => ({ id: rule.id, revision: rule.revision, operation: rule.data.operation, until: rule.data.until })).sort((a, b) => a.id.localeCompare(b.id)),
+      status, activeParent, permitted, epoch: this.repo.epoch, policy: this.repo.policyRevision })).digest('hex');
+    return { id: focus.id, title: focus.title, revision: focus.revision, controlVersion, status, sources, sourceBoundary, until,
+      ...(typeof focus.data.sessionId === 'string' && focus.data.sessionId ? { sessionId: focus.data.sessionId } : {}),
+      channel: focus.data.channel === 'local_notification' ? 'local_notification' : 'in_app',
+      pauseRules: pauses.map(rule => ({ id: rule.id, revision: rule.revision, until: typeof rule.data.until === 'string' ? rule.data.until : null,
+        resumable: !expired && !ended && permitted && activeParent && rule.data.matterId === focus.id && !rule.data.targetOpportunityId })),
+      canPause: !expired && !ended && activeParent && !pauses.length,
+      canStop: !expired && !ended,
+      canRevise: !expired && !ended && activeParent && availableSources.length > 0,
+      availableSources,
+      maximumUntil: parent?.data.type === 'attention_focus' && typeof parent.data.until === 'string' ? parent.data.until : null,
+      ...(!permitted ? { unavailableReason: grantsPresent ? 'permission_retracted' as const : 'source_permission' as const } : !activeParent && !expired && !ended ? { unavailableReason: 'parent_inactive' as const } : {}),
+    };
+  }
+
+  /** Called only after NativeControls records this exact user click as new evidence. */
+  nativeChange(handle: ScopeHandle, raw: AttentionChangeInput, source: SourceQuoteInput): AttentionControlItem {
+    const input = attentionChangeInput.parse(raw), item = this.nativeItem(handle, input.id);
+    if (item.revision !== input.expectedRevision || item.controlVersion !== input.expectedControlVersion)
+      throw new HarnessError('revision_conflict', "This matter changed. Read the current agreement before deciding.");
+    if (input.operation === 'revise') {
+      if (!item.canRevise) throw new HarnessError('attention_ended', "This matter cannot continue under the former agreement. Return to the conversation.");
+      this.control(handle, '', { operation: 'revise', targetId: item.id, expectedRevision: item.revision, source,
+        sources: input.changes!.sources, until: input.changes!.until });
+    } else if (input.operation === 'resume') {
+      const rule = item.pauseRules.find(rule => rule.id === input.ruleId && rule.revision === input.ruleRevision);
+      if (!rule?.resumable) throw new HarnessError('attention_not_resumable', "This pause cannot be lifted now. Return to the conversation to review the original agreement.");
+      this.control(handle, '', { operation: 'resume', targetId: rule.id, expectedRevision: rule.revision, source });
+    } else {
+      if (!(input.operation === 'pause' ? item.canPause : item.canStop))
+        throw new HarnessError('attention_ended', "This matter stopped; the original agreement will not restart.");
+      this.control(handle, '', { operation: input.operation, targetId: item.id, expectedRevision: item.revision, source });
+    }
+    return this.nativeItem(handle, input.id);
+  }
+
+  control(handle: ScopeHandle, sessionId: string, raw: z.infer<typeof attentionControlInput>, verified: { publicProbeHash?: string; expiryReview?: { requestedUntil: string; approved: boolean; reason: string }; includeHistory?: boolean; parentFocus?: string } = {}) {
+    const input = attentionControlInput.parse(raw);
+    if (input.operation === 'read') {
+      this.policy.require(handle, 'evidence:read');
+      const management = this.managementScope(handle);
+      return { focuses: this.repo.workData(management, ['attention_focus'], { limit: 24 }).map(record => this.controlMetadata(record)),
+        rules: this.rules(handle, input.targetId).map(record => this.controlMetadata(record)), helpHistory: [],
+        meaning: "Only attention-control identity, revision, state, and scope are supplied here. No old chat text, personal profile, or prepared body is read." };
+    }
+    const scope = this.policy.require(handle, 'work:write');
+    if (scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self') throw new HarnessError('attention_scope', "Attention can be managed only for the person's own real-world scope.");
+    if (!input.source?.eventId) throw new HarnessError('source_required', "This attention control is not yet bound to this round's original words.");
+    const event = this.repo.evidence(handle, input.source.eventId);
+    if (!event || event.speaker !== 'user' || event.authority !== 'user_statement' || (scope.currentEventIds.length > 0 && !scope.currentEventIds.includes(event.id)))
+      throw new HarnessError('source_required', "Attention and pausing need a real new statement by the person within the current scope, not an inference from old grades or character.");
+    const source = resolveSourceQuote(event, input.source);
+    if (!source) throw new HarnessError('attention_source_unresolved', "The attention quotation is ambiguous, changed, or incomplete. Expand the current exact quotation or supply actual contentVersion/start/end. Attention was not changed.");
+    const management = this.managementScope(handle);
+    const managedTarget = input.targetId ? this.repo.work(this.managementScope(handle, input.targetId), undefined, input.targetId)[0] : undefined;
+    const target = input.targetId ? this.repo.work(handle, undefined, input.targetId)[0] ||
+      (managedTarget && ['attention_focus', 'attention_rule', 'help_opportunity'].includes(String(managedTarget.data.type)) ? managedTarget : undefined) : undefined;
+    if (input.targetId && !target) throw new HarnessError('target_missing', "Locate the affected matter first.");
+    if (target && input.expectedRevision !== undefined && input.expectedRevision !== target.revision) throw new HarnessError('revision_conflict', "The matter changed. Read its current revision.");
+    if (input.until && Date.parse(input.until) <= Date.parse(this.repo.clock.now())) throw new HarnessError('expired_control', "The specified scope ended.");
+    if (input.operation === 'revise') {
+      if (!target || target.data.type !== 'attention_focus' || input.expectedRevision === undefined)
+        throw new HarnessError('focus_required', "Select the current version of this entrusted matter before editing its agreement.");
+      const item = this.nativeItem(handle, target.id);
+      if (!item.canRevise) throw new HarnessError('attention_ended', "This matter stopped or its original conditions changed; the old agreement will not restart.");
+      if (input.title !== undefined || input.rule !== undefined || input.channel !== undefined || input.eventCategory !== undefined || input.probe !== undefined || input.wakeAt !== undefined)
+        throw new HarnessError('focus_revision_fields', "This edit may change the original source scope and ending time. The subject and reminder channels retain the original agreement.");
+      const sources = [...new Set(input.sources || item.sources)], until = input.until === undefined ? item.until : input.until;
+      if (!sources.length || sources.some(source => !item.availableSources.includes(source)))
+        throw new HarnessError('focus_scope', "Choose only sources originally permitted for this matter and still usable now.");
+      if (item.maximumUntil && (!until || Date.parse(until) > Date.parse(item.maximumUntil)))
+        throw new HarnessError('focus_scope', "This matter cannot outlast its parent agreement.");
+      if (canonical([...sources].sort()) === canonical([...item.sources].sort()) && until === item.until)
+        throw new HarnessError('attention_unchanged', "This selection matches the current agreement; the original content is preserved.");
+      return this.repo.write(() => {
+        const probe = target.data.probe as { capability?: string } | null;
+        const keepProbe = !probe?.capability || sources.includes(this.broker.describe(probe.capability)?.sourceId || '');
+        const updated = this.work.update(management, target.id, target.revision, { evidenceIds: [...new Set([...target.evidenceIds, event.id])],
+          data: { ...target.data, sources, until, revisionSource: { ...source }, revisedAt: this.repo.clock.now(),
+            sourceBoundary: item.sourceBoundary, probe: keepProbe ? target.data.probe || null : null, publicProbeHash: keepProbe ? target.data.publicProbeHash || null : null,
+            wakeAt: ((target.data.wakeAt as string[] | undefined) || []).filter(at => Date.parse(at) > Date.parse(this.repo.clock.now()) && (!until || Date.parse(at) < Date.parse(until))),
+            pendingProbe: null, materialWakes: [], discoveryPending: true, nextScanAt: this.repo.clock.now() } });
+        this.repo.addDependency(handle, { consumerId: updated.id, producerId: event.id, producerRevision: event.contentVersion, sensitivity: 'privacy', invalidation: 'block' });
+        const family = new Set([updated.id]), focuses = this.records(management, 'attention_focus');
+        for (let pass = 0; pass < focuses.length; pass++) {
+          const size = family.size;
+          for (const child of focuses) if (family.has(String(child.data.matterId))) family.add(child.id);
+          if (family.size === size) break;
+        }
+        // A narrower agreement cannot leave queued work or a late preparation
+        // holding the previous scope. Existing exposure/history stays history.
+        for (const opportunity of this.records(management, 'help_opportunity')) {
+          if (!family.has(String(opportunity.data.bindingId)) || ![...activeChoices, 'paused'].includes(opportunity.status)) continue;
+          this.reminders.cancel(opportunity.id);
+          this.work.update(management, opportunity.id, opportunity.revision, { status: 'stale', data: { ...opportunity.data, artifact: null, invalidationReason: 'attention_revised' } });
+        }
+        for (const child of focuses) if (child.id !== updated.id && family.has(child.id) && child.status === 'active' && !this.bindingActive(management, child)) {
+          this.work.update(management, child.id, child.revision, { status: 'inactive', data: { ...child.data, invalidationReason: 'parent_attention_revised' } });
+          this.repo.db.prepare("UPDATE h_watches SET status='inactive' WHERE goal_id=?").run(child.id);
+        }
+        this.repo.db.prepare("UPDATE h_watches SET payload=json_set(payload,'$.actionableUntil',?),novelty_key=NULL WHERE goal_id=? AND status='active'")
+          .run(until || new Date(Date.parse(this.repo.clock.now()) + 365 * 86400000).toISOString(), updated.id);
+        return updated;
+      });
+    }
+    if (input.operation === 'follow') {
+      if (!input.title || !input.rule || !input.sources?.length) throw new HarnessError('focus_incomplete', "Specify what to watch, the purpose, sources, and allowed channels.");
+      if (input.sources.some(source => !scope.sources.includes(source))) throw new HarnessError('source_forbidden', "Attention cannot expand this round's source scope.");
+      if (verified.parentFocus && (!target || target.id !== verified.parentFocus || target.data.type !== 'attention_focus' || !this.bindingActive(handle, target) ||
+        input.sources.some(source => !(target.data.sources as string[]).includes(source)) ||
+        (input.channel === 'local_notification' && target.data.channel !== 'local_notification') ||
+        (target.data.until && (!input.until || Date.parse(input.until) > Date.parse(String(target.data.until)))) || !target.evidenceIds.includes(event.id)))
+        throw new HarnessError('focus_scope', "Derived attention inherits only a still-valid request's sources, duration, and channels.");
+      if (input.wakeAt?.some(at => Date.parse(at) <= Date.parse(this.repo.clock.now()) || input.until && Date.parse(at) >= Date.parse(input.until))) throw new HarnessError('wake_time', "A wake point must lie in the future within the current request's validity.");
+      if (input.probe) {
+        const capability = this.broker.describe(input.probe.capability);
+        if (!capability || capability.effect !== 'read' || !input.sources.includes(capability.sourceId) || !capability.requiredScopes.every(grant => scope.grants.includes(grant)))
+          throw new HarnessError('probe_forbidden', "Background work may read only capabilities and sources already allowed for this attention.");
+        this.broker.validateArguments(input.probe.capability, this.probeArguments(input.probe));
+        if (input.probe.capability === 'research.search' && verified.publicProbeHash !== createHash('sha256').update(canonical(input.probe)).digest('hex')) throw new HarnessError('probe_purpose', "Fixed public search terms require a separate purpose check; private background cannot become background search terms.");
+      }
+      const focusId = 'focus:' + createHash('sha256').update(canonical({ eventId: event.id, ...input, source })).digest('hex');
+      const existing = this.repo.work(handle, undefined, focusId)[0];
+      if (existing) return existing;
+      const focus = this.work.create(handle, 'window', input.title, { type: 'attention_focus', sessionId, matterId: input.targetId || null,
+        rule: input.rule, governingRule: verified.parentFocus ? target!.data.rule : input.rule, until: input.until || null, eventCategory: input.eventCategory || 'all', sources: input.sources, sourceBoundary: input.sources,
+        channel: input.channel || 'in_app', source: { ...source }, probe: input.probe || null, publicProbeHash: verified.publicProbeHash || null,
+        wakeAt: [...new Set(input.wakeAt || [])].sort(), completedWakes: [], discoveryPending: true,
+        nextScanAt: this.repo.clock.now(), lastFingerprint: null, approvedAt: this.repo.clock.now(), permissionEpoch: this.repo.epoch,
+        meaning: "Authorized attention, not a new user goal or action approval.",
+      }, { id: focusId, status: 'active', evidenceIds: [event.id] });
+      for (const producerId of [event.id, ...(target ? [target.id] : [])]) this.repo.addDependency(handle, { consumerId: focus.id, producerId, producerRevision: 0, sensitivity: 'privacy', invalidation: 'block' });
+      return focus;
+    }
+    if (input.operation === 'feedback') {
+      if (!target || target.data.type !== 'cooperation_record' || !input.rule) throw new HarnessError('feedback_target', "Select an actual help instance and record explicit feedback.");
+      return this.cooperation.feedback(handle, target, { ...source, response: input.rule });
+    }
+    if (input.operation === 'resume') {
+      if (!target || target.data.type !== 'attention_rule') throw new HarnessError('rule_required', "Choose the particular restriction to release; old reminders cannot all resume automatically.");
+      return this.controlMetadata(this.work.update(management, target.id, target.revision, { status: 'inactive', data: { ...target.data, endedBy: { ...source } } }));
+    }
+    const ruleText = input.rule || source.quote;
+    const rule = this.work.create(handle, 'experience', ruleText.slice(0, 160), {
+      type: 'attention_rule', sessionId, matterId: target?.data.type === 'attention_focus' ? target.id : input.targetId || null,
+      operation: input.operation, rule: ruleText, until: input.until || null, source: { ...source },
+      ...(target?.data.type === 'help_opportunity' ? { targetOpportunityId: target.id, targetBindingId: target.data.bindingId,
+        targetObjectId: (target.data.facts as { objectId?: string })?.objectId || null } : {}),
+      ...(verified.expiryReview ? { expiryReview: verified.expiryReview } : {}),
+      optionalOnly: true, maximumDisplays: input.operation === 'once' ? 1 : null,
+      ...(input.operation === 'once' ? { onceContractVersion: 1 } : {}),
+    }, { status: 'active', evidenceIds: [event.id] });
+    this.repo.addDependency(handle, { consumerId: rule.id, producerId: event.id, producerRevision: event.contentVersion, sensitivity: 'privacy', invalidation: 'block' });
+    const focuses = this.records(management, 'attention_focus');
+    const controlledBindings = new Set<string>(input.targetId ? [input.targetId] : focuses.map(focus => focus.id));
+    for (let pass = 0; pass < focuses.length; pass++) {
+      const previousSize = controlledBindings.size;
+      for (const focus of focuses) if (controlledBindings.has(String(focus.data.matterId))) controlledBindings.add(focus.id);
+      if (previousSize === controlledBindings.size) break;
+    }
+    // Existing suggestions must also respect a new rule. Explicit independent
+    // appointments/reminders are not in this set and remain untouched.
+    for (const opportunity of this.records(management, 'help_opportunity')) {
+      if (input.targetId && opportunity.id !== input.targetId && !controlledBindings.has(String(opportunity.data.bindingId)) && !controlledBindings.has(String(opportunity.data.matterId))) continue;
+      if (!activeChoices.includes(opportunity.status)) continue;
+      this.reminders.cancel(opportunity.id);
+      this.work.update(management, opportunity.id, opportunity.revision, { status: input.operation === 'pause' ? 'paused' : input.operation === 'stop' ? 'stale' : 'candidate', data: { ...opportunity.data, invalidationReason: 'attention_rule_changed', ruleId: rule.id, ...(input.operation === 'stop' ? { artifact: null } : {}), ...(input.operation === 'pause' ? { pausedBy: rule.id } : {}) } });
+    }
+    if (input.operation === 'stop') {
+      for (const focus of focuses) if (controlledBindings.has(focus.id)) {
+        const current = this.repo.work(management, undefined, focus.id)[0];
+        if (current && current.status !== 'inactive') this.work.update(management, current.id, current.revision, { status: 'inactive' });
+        this.repo.invalidate(focus.id, 'attention_stopped');
+      }
+      for (const bindingId of controlledBindings) this.repo.db.prepare("UPDATE h_watches SET status='inactive' WHERE goal_id=?").run(bindingId);
+    }
+    if (input.operation === 'once') {
+      const matters = new Set([...controlledBindings, ...(target?.data.type === 'help_opportunity' ? [String(target.data.bindingId)] : [])]);
+      for (const matterId of matters) for (const help of this.cooperation.interventions(handle, matterId)) {
+        const event = this.contactEvent(help);
+        if (event) this.consumeOnce(handle, help, event);
+      }
+    }
+    return this.repo.work(handle, undefined, rule.id)[0] || rule;
+  }
+
+  rules(handle: ScopeHandle, bindingId?: string, objectId?: string, opportunityId?: string) {
+    const scope = this.policy.validate(handle);
+    if (!this.ownerControlScope(scope)) return [];
+    const management = this.managementScope(handle);
+    const ancestors = new Set<string>();
+    let cursor = bindingId;
+    while (cursor && !ancestors.has(cursor)) {
+      ancestors.add(cursor);
+      const managed = this.repo.work(management, undefined, cursor)[0];
+      const parent = (managed && ['attention_focus', 'attention_rule', 'help_opportunity'].includes(String(managed.data.type)) ? managed : this.repo.work(handle, undefined, cursor)[0])?.data.matterId;
+      cursor = typeof parent === 'string' ? parent : undefined;
+    }
+    return this.records(management, 'attention_rule', ['active']).filter(rule =>
+      (!bindingId || (rule.data.targetOpportunityId
+        ? rule.data.targetOpportunityId === opportunityId || !!objectId && rule.data.targetObjectId === objectId && ancestors.has(String(rule.data.targetBindingId))
+        : !rule.data.matterId || ancestors.has(String(rule.data.matterId)))) && (!rule.data.until || Date.parse(String(rule.data.until)) > Date.parse(this.repo.clock.now())))
+      .map(rule => scope.sources.includes('history:self') && this.repo.work(handle, undefined, rule.id)[0] || this.controlMetadata(rule));
+  }
+
+  private ownerControlScope(scope: ReturnType<PolicyKernel['validate']>) {
+    return scope.principalId === this.repo.identity.principalId && scope.workspaceId === this.repo.identity.workspaceId &&
+      scope.subjectId === scope.principalId && scope.worldId === 'real' && scope.audience === 'self' && !scope.child;
+  }
+
+  /** Host-only authority over existing attention controls. It admits exact
+   * provenance IDs for validation, never history/profile sources or a model
+   * context. Ordinary material reads keep their original scope. */
+  private managementScope(handle: ScopeHandle, targetId?: string) {
+    const scope = this.policy.validate(handle);
+    if (!this.ownerControlScope(scope)) throw new HarnessError('attention_scope', "Only the person's own real-world private attention controls can be managed.");
+    const rows = this.repo.db.prepare(`SELECT id,purpose,json_extract(payload,'$.evidenceIds') AS evidence_ids FROM h_work
+      WHERE owner=? AND workspace=? AND subject=? AND world='real' AND audience='self' AND source='work:self'
+      AND json_extract(payload,'$.data.type') IN ('attention_focus','attention_rule','help_opportunity') ${targetId ? 'AND id=?' : ''}`)
+      .all(scope.principalId, scope.workspaceId, scope.principalId, ...(targetId ? [targetId] : []));
+    return this.policy.hostScope({ sources: ['work:self'], currentEventIds: [...new Set([...scope.currentEventIds, ...rows.flatMap(row => JSON.parse(String(row.evidence_ids || '[]')) as string[])])],
+      purposes: [...new Set([...scope.purposes, ...rows.map(row => String(row.purpose))])], grants: scope.grants, retention: scope.retention, infer: false });
+  }
+
+  private controlMetadata(record: WorkRecord): WorkRecord {
+    const data = record.data, selected: WorkRecord['data'] = { type: data.type!, controlMetadataOnly: true };
+    for (const key of ['matterId', 'bindingId', 'operation', 'until', 'channel', 'sources', 'sourceBoundary', 'targetOpportunityId', 'targetBindingId', 'targetObjectId', 'maximumDisplays', 'onceUse', 'onceContractVersion'])
+      if (data[key] !== undefined) selected[key] = data[key];
+    let title = data.type === 'attention_focus' ? record.title : "Optional help";
+    if (data.type === 'attention_rule') {
+      const labels: Record<string, string> = { pause: "Pause", stop: "Stop", once: "Remind once", avoid: "Initiative basis restriction" };
+      const targetId = data.targetBindingId || data.matterId;
+      const target = typeof targetId === 'string' ? this.repo.db.prepare(`SELECT title FROM h_work WHERE id=? AND owner=? AND workspace=? AND subject=? AND world='real' AND audience='self' AND source='work:self' AND json_extract(payload,'$.data.type')='attention_focus'`)
+        .get(targetId, record.ownerId, record.workspaceId, record.ownerId) : undefined;
+      title = (labels[String(data.operation)] || "Attention restriction") + (target ? ' · ' + String(target.title) : typeof targetId === 'string' ? ' · ' + targetId : " · All attention");
+    }
+    return { ...record, title, evidenceIds: [], data: selected };
+  }
+
+  private records(handle: ScopeHandle, type: string, statuses?: string[]) {
+    const records: WorkRecord[] = [];
+    for (let offset = 0; ; offset += 100) {
+      const page = this.repo.workData(handle, [type], { statuses, limit: 100, offset });
+      records.push(...page);
+      if (page.length < 100) return records;
+    }
+  }
+
+  private focusPermissionCurrent(focus: WorkRecord) {
+    if (focus.data.type !== 'attention_focus') return true;
+    const sources = (focus.data.sources as string[] | undefined) || [], required = new Set<string>(sources.map(source => source === 'map:local' ? 'map:read' : source === 'weather:open-meteo' ? 'weather:read'
+      : source === 'profile:self' ? 'memory:read' : source.startsWith('campus:') ? 'campus:read' : 'evidence:read'));
+    const probe = focus.data.probe as { capability?: string } | null;
+    if (probe?.capability) for (const grant of this.broker.describe(probe.capability)?.requiredScopes || []) required.add(grant);
+    const epoch = typeof focus.data.permissionEpoch === 'number' ? focus.data.permissionEpoch : undefined;
+    return !this.repo.fences().some(fence => fence.kind === 'revoke' && !!fence.scope && required.has(fence.scope)
+      && (epoch !== undefined ? fence.epoch > epoch : Date.parse(fence.createdAt) >= Date.parse(String(focus.data.approvedAt || focus.data.recordedAt || ''))));
+  }
+
+  private bindingActive(handle: ScopeHandle, binding: WorkRecord, visited = new Set<string>()): boolean {
+    if (binding.status !== 'active' || visited.has(binding.id) || binding.data.until && Date.parse(String(binding.data.until)) <= Date.parse(this.repo.clock.now())) return false;
+    if (!this.focusPermissionCurrent(binding)) return false;
+    visited.add(binding.id);
+    if (binding.data.type !== 'attention_focus' || !binding.data.matterId) return true;
+    const parent = this.repo.work(handle, undefined, String(binding.data.matterId))[0];
+    if (!parent || !this.bindingActive(handle, parent, visited)) return false;
+    if (parent.data.type === 'attention_focus' && (Array.isArray(binding.data.sources) && binding.data.sources.some(source => !(parent.data.sources as string[] || []).includes(String(source)))
+      || parent.data.until && (!binding.data.until || Date.parse(String(binding.data.until)) > Date.parse(String(parent.data.until)))
+      || binding.data.channel === 'local_notification' && parent.data.channel !== 'local_notification')) return false;
+    return true;
+  }
+
+  private noteCurrent(id: string, revision: number, state = 'active') {
+    if (!this.repo.db.prepare("SELECT name FROM sqlite_master WHERE name='h_notes'").get()) return false;
+    const note = this.repo.db.prepare('SELECT revision,state FROM h_notes WHERE id=? AND owner=? AND workspace=?').get(id, this.repo.identity.principalId, this.repo.identity.workspaceId);
+    return !!note && Number(note.revision) === revision && note.state === state;
+  }
+
+  private materialVersions(result: unknown): MaterialVersion[] {
+    const value = result as { sourceId?: string; data?: any }, data = value?.data;
+    if (!data) return [];
+    const list = (items: unknown): any[] => Array.isArray(items) ? items : [];
+    const versions: MaterialVersion[] = list(data.materialVersions).map(version => version?.kind === 'domain' && version.sourceId === 'local-agenda' && version.domain === 'agenda'
+      ? { kind: 'agenda', id: version.id, revision: version.revision } : version);
+    if ((value.sourceId || data.sourceId) === 'local-agenda' && data.domain === 'agenda' && typeof data.objectId === 'string' && Number.isSafeInteger(data.revision))
+      versions.push({ kind: 'agenda', id: data.objectId, revision: data.revision, state: data.operation === 'tombstone' ? 'deleted' : data.value?.done ? 'done' : 'present' });
+    const agenda = value.sourceId === 'local-agenda' ? [ ...list(data.items), ...list(data.busy), ...list(data.pending), ...list(data.acceptedMovable),
+      ...list(data.alternatives).flatMap((item: any) => item.before ? [item.before] : []) ] : list(data.localAgenda?.items);
+    for (const item of agenda) if (typeof item?.id === 'string') versions.push({ kind: 'agenda', id: item.sourceActionId || item.seriesId || item.id, revision: item.revision || 1 });
+    for (const item of [...list(data.goals), ...list(data.commitments)]) if (typeof item?.id === 'string' && Number.isSafeInteger(item.revision)) versions.push({ kind: 'work', id: item.id, revision: item.revision });
+    for (const planning of [data, (value as any).intent, data.intent]) {
+      if (planning?.record?.data?.type !== 'planning_intent') continue;
+      versions.push({ kind: 'work', id: planning.record.id, revision: planning.record.revision });
+      for (const retained of [...list(planning.adoptionEvidence?.retained?.work), ...list(planning.adoptionEvidence?.retained?.boundaries)])
+        for (const version of list(retained.recordVersions)) versions.push({ kind: 'agenda', id: version.id, revision: version.revision });
+    }
+    for (const group of list(data.campus)) for (const item of list(group.records)) if (typeof item?.id === 'string' && Number.isSafeInteger(item.revision)) versions.push({ kind: 'domain', id: item.id, revision: item.revision,
+      sourceId: item.sourceId, domain: item.domain || group.domain, institutionId: item.institutionId, termId: item.termId });
+    return [...new Map(versions.map(version => [canonical(version), version])).values()];
+  }
+
+  private planningProvenance(result: unknown): PlanningMaterialProvenance[] {
+    const value = result as any;
+    const candidates = [value, value?.data, value?.intent, value?.data?.intent], resultProvenance: PlanningMaterialProvenance[] = [];
+    for (const planning of candidates) {
+      if (planning?.record?.data?.type !== 'planning_intent') continue;
+      const adoption = planning.adoptionEvidence;
+      const attemptBasis = adoption?.status === 'not_checked' || adoption?.evidenceCoverage === 'unavailable' ? [] : adoption?.attemptBasis;
+      const parsed = planningMaterialProvenanceSchema.safeParse({ intentId: planning.record.id, intentRevision: planning.record.revision,
+        sourceBinding: planning.record.sourceBinding, attemptBasis });
+      if (!parsed.success) throw new HarnessError('planning_material_unverified', "The planning material lacks its original actual source reads and adoption proof. Reread before preparing.");
+      resultProvenance.push(parsed.data);
+    }
+    return [...new Map(resultProvenance.map(provenance => [canonical(provenance), provenance])).values()];
+  }
+
+  private evidenceVersions(event: { sourceId: string; text: string }) {
+    try { return this.materialVersions({ sourceId: event.sourceId, data: JSON.parse(event.text) }); }
+    catch { return []; }
+  }
+
+  private versionsCurrent(handle: ScopeHandle, versions: MaterialVersion[]) {
+    const scope = this.policy.validate(handle);
+    return versions.every(version => {
+      if (!Number.isSafeInteger(version.revision) || version.revision < 1) return false;
+      if (version.kind === 'work') return this.repo.work(handle, undefined, version.id)[0]?.revision === version.revision;
+      if (version.kind === 'agenda') {
+        if (!scope.sources.includes('local-agenda')) return false;
+        const row = this.repo.db.prepare("SELECT COALESCE(json_extract(payload,'$.revision'),1) AS revision,COALESCE(json_extract(payload,'$.done'),0) AS done FROM agenda WHERE id=?").get(version.id);
+        if (version.state === 'deleted') return !row && Number(this.repo.db.prepare('SELECT max(revision) AS revision FROM h_calendar_versions WHERE agenda_id=?').get(version.id)?.revision || 0) === version.revision;
+        return !!row && Number(row.revision) === version.revision && (version.state === 'done' ? !!row.done : !row.done);
+      }
+      if (version.kind !== 'domain' || !version.sourceId || !scope.sources.includes(version.sourceId)) return false;
+      const f = this.repo.filter(handle);
+      const row = this.repo.db.prepare(`SELECT revision,status FROM h_domain r WHERE ${f.sql} AND id=? AND source=? AND domain=? AND institution=? AND term=?`)
+        .get(...f.params, version.id, version.sourceId, String(version.domain), String(version.institutionId), String(version.termId));
+      return !!row && Number(row.revision) === version.revision && row.status !== 'known_absent';
+    });
+  }
+
+  private observationSources(observation: { tool: string; result: unknown }) {
+    const sources = new Set<string>();
+    const planning = this.planningProvenance(observation.result);
+    if (planning.length) {
+      sources.add('work:self');
+      const sourceId = (observation.result as { sourceId?: unknown })?.sourceId;
+      if (typeof sourceId === 'string') sources.add(sourceId);
+      for (const provenance of planning) for (const binding of [provenance.sourceBinding, ...provenance.attemptBasis.map(attempt => attempt.sourceBinding)])
+        for (const source of binding.sourceIds) sources.add(source);
+      return [...sources];
+    }
+    const visit = (value: unknown) => {
+      if (Array.isArray(value)) { value.forEach(visit); return; }
+      if (!value || typeof value !== 'object') return;
+      for (const [key, child] of Object.entries(value)) {
+        if (key === 'sourceId' && typeof child === 'string') sources.add(child);
+        else if (key === 'sourceIds' && Array.isArray(child)) { for (const source of child) if (typeof source === 'string') sources.add(source); }
+        else visit(child);
+      }
+    };
+    visit(observation.result);
+    if (observation.tool === 'manage_note') sources.add('notes:self');
+    if (observation.tool === 'resolve_time') sources.add('current');
+    if (!sources.size) throw new HarnessError('material_source_unknown', "The query retained no verifiable source material; preparation cannot be saved or shown from it.");
+    return [...sources];
+  }
+
+  private storedMaterialSources(handle: ScopeHandle, record: WorkRecord) {
+    const sources = new Set<string>(Array.isArray(record.data.sourceIds) ? record.data.sourceIds.filter((source): source is string => typeof source === 'string') : []);
+    for (const material of Array.isArray(record.data.material) ? record.data.material : []) {
+      const value = material as { sourceId?: string; sourceIds?: string[]; noteId?: string; tool?: string; evidenceId?: string };
+      if (typeof value.sourceId === 'string') sources.add(value.sourceId);
+      for (const source of value.sourceIds || []) if (typeof source === 'string') sources.add(source);
+      if (value.noteId || value.tool === 'manage_note') sources.add('notes:self');
+      if (value.evidenceId) { const event = this.repo.evidence(handle, value.evidenceId); if (event) sources.add(event.sourceId); }
+    }
+    for (const id of record.evidenceIds) { const event = this.repo.evidence(handle, id); if (event?.speaker === 'external') sources.add(event.sourceId); }
+    return [...sources];
+  }
+
+  private observationNoteSources(observation: MaterialObservation): NoteSourceProof[] {
+    if (observation.tool !== 'manage_note') return [];
+    const result = observation.result as { note?: { id?: string; revision?: number; sha256?: string }; offset?: number; end?: number;
+      items?: { id?: string; revision?: number; sha256?: string }[] } | undefined;
+    const args = observation.requestedArguments as { input?: { id?: string } } | undefined;
+    const proofs = result?.note ? [{ id: result.note.id, revision: result.note.revision, sha256: result.note.sha256,
+      start: result.offset, end: result.end }]
+      : (result?.items || []).map(note => ({ id: note.id || args?.input?.id, revision: note.revision, sha256: note.sha256, start: 0, end: 0 }));
+    return proofs.map(proof => {
+      const parsed = noteSourceProofSchema.safeParse(proof);
+      if (!parsed.success) throw new HarnessError('material_note_source_unknown', "The note read did not return the original page address and revision. This preparation still needs that provenance.");
+      return parsed.data;
+    });
+  }
+
+  private campusMaterialGrants(domain: string): string[] | undefined {
+    const aliases: Record<string, string> = { schedule: 'classes', learning_courses: 'courses', assignments: 'todos',
+      gpa: 'gpa_overall', card: 'card_accounts', profile: 'student_profile', practice: 'practice_summary', sports: 'projects' };
+    if (domain === 'places' || domain === 'rules') return [];
+    const resource = aliases[domain] || domain;
+    return (campusResources as readonly string[]).includes(resource)
+      ? campusQueryGrants(validateCampusQuery({ operation: 'quick', resource })) : undefined;
+  }
+
+  private materialGrants(observation: MaterialObservation, sources: string[]) {
+    const required = new Set<string>(sources.map(source => source === 'map:local' ? 'map:read' : source === 'weather:open-meteo' ? 'weather:read'
+      : source === 'profile:self' ? 'memory:read' : source.startsWith('campus:') ? 'campus:read' : 'evidence:read'));
+    const args = observation.requestedArguments as Record<string, any> | undefined;
+    const capability = observation.tool === 'look_up' ? args?.capability || (args?.source === 'campus' ? args.mode === 'overview' ? 'campus.overview' : 'campus.lookup' : undefined) : observation.tool;
+    for (const grant of capability ? this.broker.describe(capability)?.requiredScopes || [] : []) required.add(grant);
+    if (!sources.some(source => source.startsWith('campus:'))) return [...required];
+    let known = false;
+    const domain = (name: unknown) => {
+      if (typeof name !== 'string') return;
+      const grants = this.campusMaterialGrants(name);
+      if (!grants) throw new HarnessError('material_permission_unknown', "Permission for the specific campus material category cannot be verified; the old body cannot be saved or shown.");
+      known = true; grants.forEach(grant => required.add(grant));
+    };
+    const input = { ...args, ...(args?.arguments || {}) };
+    if (capability === 'campus.query') {
+      const query = validateCampusQuery(Object.fromEntries(Object.entries(input).filter(([key]) => key in campusQueryInput.shape)));
+      campusQueryGrants(query).forEach(grant => required.add(grant)); known = true;
+    } else if (capability === 'campus.lookup' || capability === 'campus.imported_lookup') domain(input.domain);
+    else if (capability === 'campus.overview') {
+      known = true;
+      if (input.includeSensitiveDomains) for (const name of campusResources) this.campusMaterialGrants(name)!.forEach(grant => required.add(grant));
+    }
+    const data = (observation.result as { data?: any } | undefined)?.data;
+    domain(data?.domain);
+    for (const item of Array.isArray(data?.domains) ? data.domains : []) domain(item.domain);
+    for (const group of Array.isArray(data?.campus) ? data.campus : []) {
+      domain(group.domain);
+      for (const item of Array.isArray(group.records) ? group.records : []) domain(item.domain);
+    }
+    for (const version of this.materialVersions(observation.result)) if (version.kind === 'domain' && (!version.sourceId || version.sourceId.startsWith('campus:'))) domain(version.domain);
+    if (!known) throw new HarnessError('material_permission_unknown', "The campus material lacks its query category or permission proof. Reread before preparing.");
+    return [...required];
+  }
+
+  /** Unrelated source changes remain evidence, not instructions. The same
+   * assistant evaluates them against the user's broad rule; no topic lexicon. */
+  discover(handle: ScopeHandle, change: DomainChange) {
+    // An unexamined change stays pending while ongoing attention is off.
+    if (this.preferences?.().followup === 'on_request') return false;
+    let accepted = true;
+    for (const focus of this.records(handle, 'attention_focus', ['active'])) {
+      if (!this.bindingActive(handle, focus) || !(focus.data.sources as string[]).includes(change.sourceId)) continue;
+      const rules = this.rules(handle, focus.id, change.objectId);
+      if (rules.some(rule => rule.data.operation === 'stop')) continue;
+      if (rules.some(rule => rule.data.operation === 'pause')) { accepted = false; continue; }
+      const facts = { objectId: change.objectId, operation: change.operation, revision: change.revision, value: change.value, observedAt: change.observedAt, discovery: 'source_change_within_mandate' };
+      const offered = this.offer(handle, { bindingId: focus.id, watchId: 'discovery:' + focus.id, evidenceId: change.eventId, category: change.domain, title: focus.title,
+        facts, noveltyKey: change.eventId, expiresAt: String(focus.data.until || new Date(Date.parse(this.repo.clock.now()) + 7 * 86400000).toISOString()) });
+      if (!offered && !this.records(handle, 'help_opportunity').some(item => item.data.bindingId === focus.id && item.data.noveltyKey === change.eventId)) accepted = false;
+    }
+    return accepted;
+  }
+
+  acceptSignal(handle: ScopeHandle, input: HelpSignal) {
+    const opportunity = this.offer(handle, input);
+    if (opportunity) return { opportunity, acknowledged: true };
+    const event = this.repo.evidence(handle, input.evidenceId), binding = this.repo.work(handle, undefined, input.bindingId)[0];
+    if (event && binding && this.bindingActive(handle, binding) && this.rules(handle, binding.id, String(input.facts.objectId || '')).some(rule => rule.data.operation === 'pause'))
+      return { opportunity: null, acknowledged: false };
+    if (!event || !binding || !this.bindingActive(handle, binding) || Date.parse(input.expiresAt) <= Date.parse(this.repo.clock.now()) ||
+      this.rules(handle, binding.id, String(input.facts.objectId || '')).some(rule => ['pause', 'stop'].includes(String(rule.data.operation))) ||
+      binding.data.type === 'attention_focus' && !(binding.data.sources as string[]).includes(event.sourceId) && !binding.evidenceIds.includes(event.id)) return { opportunity: null, acknowledged: true };
+    const fingerprint = createHash('sha256').update(canonical({ bindingId: binding.id, category: input.category, facts: input.facts })).digest('hex');
+    return { opportunity: null, acknowledged: this.records(handle, 'help_opportunity').some(item => item.data.bindingId === binding.id &&
+      (item.data.noveltyKey === input.noveltyKey || item.data.fingerprint === fingerprint) && !['stale', 'blocked'].includes(item.status)) };
+  }
+
+  offer(handle: ScopeHandle, input: HelpSignal) {
+    this.expire();
+    const scope = this.policy.validate(handle), event = this.repo.evidence(handle, input.evidenceId), binding = this.repo.work(handle, undefined, input.bindingId)[0];
+    if (!event || !binding || !this.bindingActive(handle, binding) || Date.parse(input.expiresAt) <= Date.parse(this.repo.clock.now())) return null;
+    const rules = this.rules(handle, binding.id, String(input.facts.objectId || ''));
+    if (rules.some(rule => ['pause', 'stop'].includes(String(rule.data.operation)))) return null;
+    if (binding.data.type === 'attention_focus' && !(binding.data.sources as string[]).includes(event.sourceId) && !binding.evidenceIds.includes(event.id)) return null;
+    const fingerprint = createHash('sha256').update(canonical({ bindingId: binding.id, category: input.category, facts: input.facts })).digest('hex');
+    const existing = this.records(handle, 'help_opportunity').filter(item => item.data.bindingId === binding.id);
+    if (existing.some(item => (item.data.noveltyKey === input.noveltyKey || item.data.fingerprint === fingerprint) && !['stale', 'blocked'].includes(item.status))) return null;
+    // Limit undecided semantic work. Already prepared materials must not hold
+    // the source queue hostage until the whole mandate expires.
+    if (existing.filter(item => ['candidate', 'waiting'].includes(item.status)).length >= 5) return null;
+    let signalGrants: string[] | undefined;
+    if (event.speaker === 'external') {
+      let data: unknown;
+      try { data = JSON.parse(event.text); } catch { data = undefined; }
+      try { signalGrants = this.materialGrants({ tool: 'supplied_evidence', result: { data } }, [event.sourceId]); }
+      catch (error) { if (!(error instanceof HarnessError) || error.code !== 'material_permission_unknown') throw error; }
+    }
+    const record = this.work.create(handle, 'window', input.title, { type: 'help_opportunity', matterId: binding.id, bindingId: binding.id, sessionId: String(binding.data.sessionId || ''),
+      watchId: input.watchId, category: input.category, facts: z.record(z.string(), z.json()).parse(input.facts), fingerprint, noveltyKey: input.noveltyKey,
+      expiresAt: input.expiresAt, channel: binding.data.type === 'attention_focus' ? binding.data.channel : 'in_app',
+      scope: { sources: binding.data.type === 'attention_focus' ? binding.data.sources : [event.sourceId], epoch: scope.privacyEpoch, policyRevision: scope.policyRevision },
+      sourceIds: event.speaker === 'external' ? [event.sourceId] : [],
+      materialNoteContractVersion: 1, noteSources: [],
+      ...(signalGrants ? { materialGrantContractVersion: 1, requiredGrants: signalGrants } : {}),
+      basisIds: [], artifact: null, choice: null, modelReason: null,
+    }, { status: 'candidate', evidenceIds: [input.evidenceId, ...binding.evidenceIds] });
+    for (const producer of [{ id: binding.id, revision: binding.revision }, { id: event.id, revision: event.contentVersion }])
+      this.repo.addDependency(handle, { consumerId: record.id, producerId: producer.id, producerRevision: producer.revision, sensitivity: 'privacy', invalidation: 'block' });
+    if (typeof input.facts.objectId === 'string' && this.repo.db.prepare('SELECT id FROM h_domain WHERE id=? AND domain=? AND source=? AND owner=? AND workspace=?').get(input.facts.objectId, input.category, event.sourceId, scope.principalId, scope.workspaceId))
+      this.repo.addDependency(handle, { consumerId: record.id, producerId: `domain:${input.category}:${input.facts.objectId}`, producerRevision: 0, sensitivity: 'hard', invalidation: 'block' });
+    if (event.sourceId === 'local-agenda' && input.category === 'agenda' && typeof input.facts.objectId === 'string' && Number.isSafeInteger(input.facts.revision))
+      this.repo.addDependency(handle, { consumerId: record.id, producerId: this.repo.calendarVersionId(input.facts.objectId, Number(input.facts.revision)), producerRevision: Number(input.facts.revision), sensitivity: 'hard', invalidation: 'block' });
+    return record;
+  }
+
+  pending(handle: ScopeHandle, limit = 5) {
+    this.expire();
+    if (this.preferences?.().followup === 'on_request') return [];
+    const all = this.records(handle, 'help_opportunity');
+    const lastReviewed = new Map<string, number>();
+    for (const item of all) {
+      const at = Date.parse(String(item.data.lastReviewAt || item.data.decidedAt || ''));
+      if (Number.isFinite(at)) lastReviewed.set(String(item.data.bindingId), Math.max(lastReviewed.get(String(item.data.bindingId)) || 0, at));
+    }
+    return this.records(handle, 'help_opportunity', ['candidate', 'waiting']).filter(item =>
+      (!item.data.reconsiderAt || Date.parse(String(item.data.reconsiderAt)) <= Date.parse(this.repo.clock.now())) &&
+      !this.rules(handle, String(item.data.bindingId), String((item.data.facts as any)?.objectId || ''), item.id).some(rule => ['pause', 'stop'].includes(String(rule.data.operation))))
+      .sort((a, b) => {
+        const now = Date.parse(this.repo.clock.now());
+        // A near expiry is an actual host deadline, not a model-generated
+        // importance score. Otherwise rotate mandates so a noisy source
+        // cannot occupy every available semantic review turn.
+        const urgent = (item: WorkRecord) => Date.parse(String(item.data.expiresAt)) <= now + 300000;
+        if (urgent(a) !== urgent(b)) return urgent(a) ? -1 : 1;
+        if (urgent(a)) return Date.parse(String(a.data.expiresAt)) - Date.parse(String(b.data.expiresAt));
+        return (lastReviewed.get(String(a.data.bindingId)) || 0) - (lastReviewed.get(String(b.data.bindingId)) || 0)
+          || Date.parse(String(a.data.recordedAt)) - Date.parse(String(b.data.recordedAt));
+      }).slice(0, limit);
+  }
+
+  /** Persist retry timing for BOTH new and previously waiting work. A late
+   * failure cannot overwrite a newer decision, cancellation or correction. */
+  settleReview(handle: ScopeHandle, original: WorkRecord, error?: unknown) {
+    const current = this.repo.work(handle, undefined, original.id)[0];
+    if (!current || current.revision !== original.revision || !['candidate', 'waiting'].includes(current.status)) return;
+    const binding = this.repo.work(handle, undefined, String(current.data.bindingId))[0];
+    if (!binding || !this.bindingActive(handle, binding) ||
+      this.rules(handle, binding.id, String((current.data.facts as any)?.objectId || ''), current.id).some(rule => ['pause', 'stop'].includes(String(rule.data.operation)))) return;
+    const failures = error ? Math.min(12, Number(current.data.reviewFailures || 0) + 1) : 0;
+    const delay = error ? Math.min(900000, 30000 * 2 ** (failures - 1)) : 1800000;
+    const now = this.repo.clock.now();
+    this.work.update(handle, current.id, current.revision, { status: 'waiting', data: { ...current.data,
+      lastReviewAt: now, reviewFailures: failures,
+      reconsiderAt: new Date(Date.parse(now) + delay).toISOString(),
+      preparationStatus: error ? 'review_failed' : 'no_artifact_produced',
+      // Error bodies may contain provider responses or private tool material.
+      reviewFailure: error ? { at: now, code: error instanceof HarnessError ? error.code : error instanceof Error && error.name === 'AbortError' ? 'interrupted' : 'review_failed' } : null,
+    } });
+  }
+
+  /** The timer is disposable; these persisted records are the schedule. The
+   * caller may still reconcile periodically for new external source events. */
+  nextReviewAt(handle = this.policy.hostScope()): string | null {
+    this.expire();
+    if (this.preferences?.().followup === 'on_request') return null;
+    const now = Date.parse(this.repo.clock.now()), times: number[] = [];
+    const add = (value: unknown) => { const time = Date.parse(String(value)); if (Number.isFinite(time)) times.push(Math.max(now, time)); };
+    for (const item of this.records(handle, 'help_opportunity', ['candidate', 'waiting'])) {
+      if (this.rules(handle, String(item.data.bindingId), String((item.data.facts as any)?.objectId || ''), item.id).some(rule => ['pause', 'stop'].includes(String(rule.data.operation)))) continue;
+      add(item.data.reconsiderAt || this.repo.clock.now());
+      // Expiry can release a full mandate queue before its next time node.
+      // Reconcile then so that capacity does not hide a shorter deadline.
+      add(item.data.expiresAt);
+    }
+    for (const focus of this.records(handle, 'attention_focus', ['active'])) {
+      if (!this.bindingActive(handle, focus) || this.rules(handle, focus.id).some(rule => ['pause', 'stop'].includes(String(rule.data.operation)))) continue;
+      const hasCapacity = this.records(handle, 'help_opportunity', ['candidate', 'waiting']).filter(item => item.data.bindingId === focus.id).length < 5;
+      if (hasCapacity && (focus.data.discoveryPending || focus.data.pendingProbe)) times.push(now);
+      const completed = (focus.data.completedWakes || []) as string[];
+      for (const at of (focus.data.wakeAt || []) as string[]) if (hasCapacity && !completed.includes(at)) add(at);
+      for (const wake of (focus.data.materialWakes || []) as unknown as MaterialWake[]) {
+        if (hasCapacity && !this.rules(handle, focus.id, wake.objectId, wake.opportunityId).some(rule => ['pause', 'stop'].includes(String(rule.data.operation)))) add(wake.at);
+      }
+      if (focus.data.probe && !focus.data.pendingProbe) add(focus.data.nextScanAt);
+    }
+    // A timed pause is itself a future decision boundary. It must not depend
+    // on the next arbitrary sixty-second poll to become eligible again.
+    for (const rule of this.records(handle, 'attention_rule', ['active'])) if (rule.data.until && Date.parse(String(rule.data.until)) > now) add(rule.data.until);
+    return times.length ? new Date(Math.min(...times)).toISOString() : null;
+  }
+
+  inspect(handle: ScopeHandle, opportunity: WorkRecord, includeHistory = true) {
+    const current = this.repo.work(handle, undefined, opportunity.id)[0];
+    if (!current || current.data.type !== 'help_opportunity') throw new HarnessError('target_missing', "This opportunity or preparation is not within the currently permitted scope.");
+    if (current.revision !== opportunity.revision) throw new HarnessError('revision_conflict', "This opportunity changed. Read its current revision.");
+    opportunity = current;
+    const bindingId = String(opportunity.data.bindingId);
+    const binding = this.repo.work(handle, undefined, bindingId)[0], parent = binding?.data.matterId;
+    return { opportunity, mandate: binding, basisUses: [...this.basis.read(handle, bindingId), ...(typeof parent === 'string' ? this.basis.read(handle, parent) : [])],
+      previousHelp: includeHistory ? this.cooperation.history(handle, bindingId) : [], rules: this.rules(handle, bindingId),
+      opportunityControls: this.rules(handle).filter(rule => rule.data.targetBindingId === bindingId),
+      suppliedMaterialIds: opportunity.evidenceIds.filter(id => this.repo.evidence(handle, id)?.speaker === 'external'),
+      deliveryReceipts: this.repo.db.prepare('SELECT d.status,d.payload FROM h_deliveries d JOIN h_jobs j ON j.id=d.job_id WHERE j.object_id=? ORDER BY d.rowid DESC LIMIT 8').all(opportunity.id)
+        .map(row => ({ status: String(row.status), ...JSON.parse(String(row.payload)), meaning: "These records are actual channel responses. submitted_to_os means the operating system accepted submission. Delivery and reading require their own evidence; unknown remains unknown. Late receipts update the original record, and stopped reminders remain stopped." })),
+      delivery: this.reminders.capabilities(), notificationsEnabled: this.reminders.attention().enabled,
+      meaning: "The opportunity, original request, prior help, and current agreement are assembled here to judge real new value and whether the window still fits. Quiet preparation, waiting, a decisive question, or setting it aside can each be appropriate. Interpret feedback from actual observations." };
+  }
+
+  decide(handle: ScopeHandle, raw: z.infer<typeof helpDecisionInput>, observations: MaterialObservation[] = [], resolveScenes?: (refs: SceneRef[]) => SceneSnapshot[], investigation?: InvestigationSession,
+    delivery: { author?: HelpArtifactAuthor; currentReply?: boolean; autonomousPublication?: boolean } = {}) {
+    this.expire();
+    const input = helpDecisionInput.parse(raw), opportunity = this.repo.work(handle, undefined, input.id)[0];
+    if (!opportunity || opportunity.data.type !== 'help_opportunity')
+      throw new HarnessError('target_missing', "No readable material or opportunity is available at this address. Omit id in inspect_help to discover it again, then follow the returned id and revision.");
+    if (opportunity.revision !== input.expectedRevision)
+      throw new HarnessError('revision_conflict', "The opportunity changed and needs reassessment under current conditions.");
+    // A foreground response already has its real model author and message.
+    // Reuse the existing material attachment path, not a second notification.
+    const inCurrentReply = delivery.currentReply && input.choice === 'notify' && opportunity.data.channel === 'in_app';
+    if (inCurrentReply) { input.choice = 'prepare'; input.presentInConversation = true; }
+    const presentingExisting = input.reuseArtifact && input.presentInConversation && ['question_ready', 'notification_queued'].includes(opportunity.status);
+    if (!['candidate', 'waiting', 'prepared'].includes(opportunity.status) && !presentingExisting) throw new HarnessError('opportunity_inactive', "This opportunity exited or was handled; the old action cannot continue.");
+    const bindingId = String(opportunity.data.bindingId), rules = this.rules(handle, bindingId, String((opportunity.data.facts as any)?.objectId || ''), opportunity.id);
+    const binding = this.repo.work(handle, undefined, bindingId)[0];
+    if (!binding || !this.bindingActive(handle, binding)) throw new HarnessError('attention_stopped', "The original request or goal stopped; old preparation cannot be published.");
+    if (rules.some(rule => ['pause', 'stop'].includes(String(rule.data.operation)))) throw new HarnessError('attention_paused', "This optional help is paused.");
+    const storedQuestionBasis = Array.isArray(opportunity.data.questionBasis) ? opportunity.data.questionBasis as { evidenceId: string; contentVersion: number; sourceId: string; readSource: string }[] : [];
+    const reusableQuestion = input.choice === 'ask' && storedQuestionBasis.length > 0 && storedQuestionBasis.every(basis => {
+      const event = this.repo.evidence(handle, basis.evidenceId);
+      return event?.status === 'active' && event.speaker === 'user' && event.contentVersion === basis.contentVersion
+        && !this.repo.db.prepare('SELECT 1 FROM h_source_restrictions WHERE event_id=? LIMIT 1').get(event.id);
+    });
+    const reused = input.reuseArtifact && opportunity.data.artifact && (Array.isArray(opportunity.data.material) && opportunity.data.material.length || reusableQuestion) ? opportunity.data.artifact as { title: string; body: string } : undefined;
+    if (input.reuseArtifact && !reused) throw new HarnessError('artifact_missing', "There is no actually prepared material to reuse.");
+    if (input.presentInConversation && !['prepare', 'ask'].includes(input.choice)) throw new HarnessError('conversation_choice', "Presentation in the current conversation requires prepare or ask and actual material.");
+    if (reused) {
+      if (input.artifact && canonical(input.artifact) !== canonical(reused)) throw new HarnessError('artifact_changed', "Reuse preserves only originally verified material. Changed content needs new actual material.");
+      input.artifact = reused;
+    }
+    const material = (input.sourceToolCallIds || []).map(callId => observations.find(observation => observation.toolCallId === callId));
+    if (material.some(item => !item)) throw new HarnessError('material_not_read', "Preparation must cite a tool observation actually obtained in this round.");
+    const materialVersions = material.flatMap(item => this.materialVersions(item!.result));
+    if (!this.versionsCurrent(handle, materialVersions)) throw new HarnessError('material_changed', "The arrangement or source revision used by the query changed. Reread before preparing.");
+    const materialExpiries = material.flatMap(item => {
+      const expiresAt = (item!.result as { expiresAt?: string })?.expiresAt;
+      return expiresAt && Number.isFinite(Date.parse(expiresAt)) ? [expiresAt] : [];
+    });
+    if (materialExpiries.some(at => Date.parse(at) <= Date.parse(this.repo.clock.now()))) throw new HarnessError('material_expired', "The query material expired. Refresh before preparing.");
+    for (const item of material) {
+      const note = (item?.result as { note?: { id: string; revision: number } })?.note;
+      if (item?.tool === 'manage_note' && note && !this.noteCurrent(note.id, note.revision)) throw new HarnessError('material_changed', "The note changed or was removed. Reread its current revision before preparing.");
+    }
+    const sceneRefs = input.artifact?.sceneRefs || [];
+    if (!reused && sceneRefs.some(ref => !material.some(item => {
+      const observed = (item?.result as { sceneRef?: SceneRef } | undefined)?.sceneRef;
+      return observed?.id === ref.id && observed.revision === ref.revision;
+    }))) throw new HarnessError('scene_material', "A prepared view must bind to map or weather observations actually obtained here, not unrelated old views.");
+    const sceneSnapshots = !reused && sceneRefs.length ? resolveScenes?.(sceneRefs) : undefined;
+    if (!reused && sceneRefs.length && !sceneSnapshots) throw new HarnessError('scene_unavailable', "This preparation channel has not verified these views.");
+    const suppliedIds = [...new Set([...(input.materialEvidenceIds || []), ...(input.newValue?.evidenceIds.filter(id => opportunity.evidenceIds.includes(id)) || [])])];
+    const supplied = suppliedIds.map(id => opportunity.evidenceIds.includes(id) ? this.repo.evidence(handle, id) : undefined);
+    if (supplied.some(event => !event || event.speaker !== 'external')) throw new HarnessError('material_not_supplied', "Use only external material actually supplied for this opportunity. Permission to watch is not a query result.");
+    const suppliedVersions = supplied.flatMap(event => this.evidenceVersions(event!));
+    if (!this.versionsCurrent(handle, suppliedVersions)) throw new HarnessError('material_changed', "The supplied local arrangements changed. Prepare against their current revision.");
+    materialVersions.push(...suppliedVersions);
+    const planningProvenance = reused ? opportunity.data.planningProvenance : [...new Map([
+      ...material.flatMap(item => this.planningProvenance(item!.result)),
+      ...supplied.flatMap(event => { try { return this.planningProvenance({ data: JSON.parse(event!.text) }); } catch (error) { if (error instanceof SyntaxError) return []; throw error; } }),
+    ].map(provenance => [canonical(provenance), provenance])).values()];
+    if (!this.repo.planningMaterialReadable(handle, planningProvenance || []))
+      throw new HarnessError('planning_material_changed', "The original words or adoption proof underlying the plan changed. Recheck before preparing.");
+    const scope = this.policy.validate(handle);
+    // A question can be grounded in the user's missing conditions alone.
+    // Keep the original source/version while recording an already-authorized
+    // current-event projection as current; this is never external material.
+    const questionBasis = reused && reusableQuestion ? storedQuestionBasis : input.choice === 'ask' && !material.length && !supplied.length && !reused
+      ? [...new Set(opportunity.evidenceIds)].flatMap(id => {
+        const event = this.repo.evidence(handle, id);
+        return event?.speaker === 'user' && event.authority === 'user_statement' && event.status === 'active'
+          ? [{ evidenceId: event.id, contentVersion: event.contentVersion, sourceId: event.sourceId,
+            readSource: scope.currentEventIds.includes(event.id) ? 'current' : event.sourceId }] : [];
+      }) : [];
+    if (input.choice === 'ask' && !material.length && !supplied.length && !reused && !questionBasis.length)
+      throw new HarnessError('source_required', "This question still needs readable user evidence.");
+    const materialSources = material.map(item => this.observationSources(item!));
+    const storedNoteSources = Array.isArray(opportunity.data.noteSources)
+      ? opportunity.data.noteSources.map(value => noteSourceProofSchema.parse(value)) : [];
+    const noteSources = [...new Map([...storedNoteSources, ...(!reused ? material.flatMap(item => this.observationNoteSources(item!)) : [])]
+      .map(proof => [canonical(proof), proof])).values()];
+    if (!this.repo.noteSourcesReadable(handle, noteSources))
+      throw new HarnessError('material_note_changed', "A note page cited by this preparation is no longer readable.");
+    const storedWorkoutSources = opportunity.data.workoutSources === undefined ? []
+      : workoutSourceProofSchema.array().parse(opportunity.data.workoutSources);
+    const workoutSources = [...new Map([...storedWorkoutSources,
+      ...(!reused ? material.flatMap(item => workoutObservationSources(item!.result)) : [])]
+      .map(proof => [canonical(proof), proof])).values()];
+    if (!this.repo.workoutSourcesReadable(handle, workoutSources))
+      throw new HarnessError('workout_source_changed', "The activity record used by this preparation was removed. Its old summary was not retained as preparation.");
+    const sourceIds = [...new Set([...this.storedMaterialSources(handle, opportunity), ...materialSources.flat(), ...supplied.map(event => event!.sourceId), ...questionBasis.map(item => item.readSource)])];
+    const materialGrants = material.map((item, index) => this.materialGrants(item!, materialSources[index]));
+    const suppliedGrants = supplied.map(event => {
+      let data: unknown;
+      try { data = JSON.parse(event!.text); } catch { data = undefined; }
+      return this.materialGrants({ tool: 'supplied_evidence', result: { data } }, [event!.sourceId]);
+    });
+    const requiredGrants = [...new Set([...(Array.isArray(opportunity.data.requiredGrants) ? opportunity.data.requiredGrants.filter((grant): grant is string => typeof grant === 'string') : []),
+      ...sourceIds.map(source => source === 'map:local' ? 'map:read' : source === 'weather:open-meteo' ? 'weather:read'
+        : source === 'profile:self' ? 'memory:read' : source.startsWith('campus:') ? 'campus:read' : 'evidence:read'),
+      ...materialGrants.flat(), ...suppliedGrants.flat()])];
+    if (sourceIds.some(source => !scope.sources.includes(source))) throw new HarnessError('material_source_forbidden', "A source used to prepare this content is no longer readable. Set the old material aside.");
+    if (['prepare', 'notify', 'ask'].includes(input.choice) && !input.artifact) throw new HarnessError('artifact_required', "No actual artifact exists, so it cannot be marked prepared.");
+    if (input.choice === 'prepare' && !material.length && !supplied.length && !reused) throw new HarnessError('material_not_read', "Quiet preparation needs an actual query or supplied material.");
+    for (const item of material) if (!item || ['inspect_help'].includes(item.tool) || (item.result as any)?.catalogOnly || (item.result as any)?.inputSchema || ['failed', 'forbidden', 'not_connected', 'unknown', 'error'].includes(String((item.result as any)?.status))) throw new HarnessError('material_unavailable', "The cited query obtained no usable material. A capability description and opportunity are not new query material.");
+    const contacts = this.cooperation.interventions(handle, bindingId);
+    this.seedOnce(handle, contacts);
+    const validNewEvidence = input.newValue?.evidenceIds.every(id => opportunity.evidenceIds.includes(id) && this.repo.evidence(handle, id)?.speaker === 'external' || material.some(item => item?.toolCallId === id));
+    if (input.newValue && !validNewEvidence) throw new HarnessError('new_value_evidence', "A new reason can cite only material verified in this round: " + [...supplied.map(event => event!.id), ...material.map(item => item!.toolCallId!)].join('、'));
+    const repeated = contacts.some(record => record.data.basisFingerprint === opportunity.data.fingerprint);
+    const duplicate = input.duplicateOf || repeated;
+    const onceExhausted = rules.some(rule => this.onceHeld(rule, contacts));
+    const onceCoverageUnknown = onceExhausted && rules.filter(rule => this.onceHeld(rule, contacts)).every(rule => this.onceCoverageUnknown(rule, contacts));
+    const onceUnknown = onceExhausted && rules.filter(rule => this.onceHeld(rule, contacts)).every(rule => this.pendingContact(this.onceEvent(rule, contacts)));
+    const preferences = this.preferences?.();
+    const inAppOnly = preferences && (preferences.initiative !== 'when_useful' || preferences.followup === 'on_request') && input.choice === 'notify';
+    const showExisting = input.presentInConversation && !!reused && !input.duplicateOf;
+    const choice = duplicate && !showExisting ? 'none'
+      : onceExhausted && !showExisting ? onceCoverageUnknown && ['prepare', 'ask', 'notify'].includes(input.choice)
+        ? input.choice === 'notify' ? 'prepare' : input.choice : 'none'
+        : inAppOnly ? 'prepare' : input.choice;
+    if (choice === 'notify' && (!input.newValue || !validNewEvidence)) throw new HarnessError('new_value_required', "Proactive contact needs an explanation of present new value, citing an actual change or query material.");
+    if (choice === 'prepare' && !material.length && !supplied.length && !reused) throw new HarnessError('material_not_read', "In-app preparation also needs actual material, not merely a claim that research is ready.");
+    if (choice === 'notify' && !['in_app', 'local_notification'].includes(String(opportunity.data.channel))) throw new HarnessError('channel_forbidden', "The original request did not permit this contact channel.");
+    const inAppNotify = choice === 'notify' && opportunity.data.channel === 'in_app';
+    if (inAppNotify && !delivery.autonomousPublication)
+      throw new HarnessError('channel_forbidden', "Proactive in-app contact must use the original background publication entry. Deliver material in this reply through prepare and presentInConversation.");
+    const artifactAuthor = reused ? opportunity.data.artifactAuthor : delivery.author;
+    if (inAppNotify && (this.preferences?.().initiative !== 'when_useful' || this.preferences?.().followup !== 'meaningful_change'))
+      throw new HarnessError('initiative_quiet', "Current initiative preferences do not permit starting a conversation. Material can still be prepared quietly.");
+    if (inAppNotify && (!artifactAuthor || typeof artifactAuthor !== 'object' || Array.isArray(artifactAuthor)
+      || typeof artifactAuthor.name !== 'string' || !Number.isSafeInteger(artifactAuthor.personaRevision)))
+      throw new HarnessError('artifact_author_unknown', "This old material lacks its original character signature and cannot be sent proactively under a different name. Preserve it quietly or prepare real new content with the current character.");
+    if (input.reconsiderAt && Date.parse(input.reconsiderAt) <= Date.parse(this.repo.clock.now())) throw new HarnessError('reconsider_time', "Waiting for reassessment needs a future time.");
+    const basisRecords = (input.basisIds || []).map(id => this.repo.work(handle, undefined, id)[0]);
+    if (basisRecords.some(record => !record || record.data.type !== 'basis_use' || !['supported', 'tentative'].includes(record.status))) throw new HarnessError('basis_inactive', "The cited interpretation is no longer applicable and needs reassessment.");
+    const parentMatter = this.repo.work(handle, undefined, bindingId)[0]?.data.matterId;
+    if (basisRecords.some(record => record!.data.matterId !== bindingId && record!.data.matterId !== parentMatter)) throw new HarnessError('basis_matter_mismatch', "This interpretation is unrelated to the current attention matter.");
+    return this.repo.write(() => {
+      if (investigation) {
+        if (!this.investigation || investigation.opportunityId !== opportunity.id || investigation.opportunityRevision !== opportunity.revision)
+          throw new HarnessError('investigation_decision_changed', "The investigation's opportunity changed. Old progress was not acknowledged.");
+        this.investigation.ackInTransaction(investigation, handle, randomUUID());
+      }
+      if (!this.repo.planningMaterialReadable(handle, planningProvenance || []))
+        throw new HarnessError('planning_material_changed', "The original planning evidence changed during preparation. The old body was not saved.");
+      const status = choice === 'none' ? 'declined' : choice === 'wait' ? 'waiting' : choice === 'ask' ? 'question_ready' : choice === 'notify' && !inAppNotify ? 'notification_queued' : 'prepared';
+      const next = this.work.update(handle, opportunity.id, opportunity.revision, { status, data: { ...opportunity.data, choice,
+        modelReason: input.reason, actionDescription: input.actionDescription, basisIds: input.basisIds || [],
+        materialContractVersion: 1,
+        materialPlanningContractVersion: 1, planningProvenance: planningProvenance || [],
+        materialSourceContractVersion: 1, sourceIds, materialGrantContractVersion: 1, requiredGrants, questionBasis,
+        materialNoteContractVersion: 1, noteSources,
+        materialWorkoutContractVersion: 1, workoutSources: z.json().parse(workoutSources),
+        expiresAt: new Date(Math.min(Date.parse(String(opportunity.data.expiresAt)), ...materialExpiries.map(Date.parse))).toISOString(),
+        reconsiderAt: input.reconsiderAt || (choice === 'wait' ? new Date(Date.parse(this.repo.clock.now()) + 1800000).toISOString() : null), artifact: ['none', 'wait'].includes(choice) ? null : JSON.parse(JSON.stringify({ ...input.artifact!, ...(sceneSnapshots ? { scenes: sceneSnapshots } : {}) })),
+        material: reused ? opportunity.data.material : [...material.map((item, index) => { const result = item!.result as { sourceId?: string; observedAt?: string; fetchedAt?: string; expiresAt?: string; note?: { id: string; revision: number } }; return { tool: item!.tool, observationId: item!.toolCallId!, resultHash: createHash('sha256').update(canonical(item!.result)).digest('hex'), sourceIds: materialSources[index], requiredGrants: materialGrants[index], ...(result.sourceId ? { sourceId: result.sourceId } : {}), ...(result.expiresAt ? { expiresAt: result.expiresAt } : {}), versions: z.json().parse(this.materialVersions(item!.result)), ...(item!.tool === 'manage_note' && result.note ? { sourceId: 'notes:self', noteId: result.note.id, noteRevision: result.note.revision } : {}), observedAt: result.observedAt || result.fetchedAt || this.repo.clock.now() }; }), ...supplied.map((event, index) => ({ evidenceId: event!.id, contentVersion: event!.contentVersion, sourceId: event!.sourceId, requiredGrants: suppliedGrants[index], versions: z.json().parse(this.evidenceVersions(event!)), resultHash: createHash('sha256').update(event!.text).digest('hex') }))],
+        duplicateOf: input.duplicateOf || null, newValue: input.newValue || null,
+        artifactAuthor: artifactAuthor ? JSON.parse(JSON.stringify(artifactAuthor)) : null,
+        presentationChannel: input.presentInConversation || inAppNotify ? 'conversation' : null, decidedAt: this.repo.clock.now(),
+      } });
+      for (const version of materialVersions) this.repo.addDependency(handle, { consumerId: next.id,
+        producerId: version.kind === 'domain' ? `domain:${version.domain}:${version.id}` : version.kind === 'agenda' ? this.repo.calendarVersionId(version.id, version.revision) : version.id,
+        producerRevision: version.revision, sensitivity: 'hard', invalidation: 'block' });
+      for (const source of workoutSources) this.repo.addDependency(handle, { consumerId: next.id,
+        producerId: workoutSourceObjectId(source.workoutId), producerRevision: 0, sensitivity: 'privacy', invalidation: 'block' });
+      for (const basis of basisRecords) this.basis.link(handle, basis!, next.id);
+      let conversationHelpRef: { id: string; revision: number; helpRecordId: string } | undefined;
+      if (['prepare', 'ask', 'notify'].includes(choice)) {
+        const originalHelp = reused && typeof opportunity.data.helpRecordId === 'string'
+          ? this.repo.work(handle, undefined, opportunity.data.helpRecordId)[0] : undefined;
+        if (reused && (!originalHelp || originalHelp.data.type !== 'cooperation_record'
+          || originalHelp.data.opportunityId !== opportunity.id || originalHelp.data.matterId !== bindingId))
+          throw new HarnessError('help_preparation_changed', "The original help record for this preparation cannot currently be verified; it was not counted as a new draft.");
+        const help = originalHelp || this.cooperation.record(handle, { opportunityId: next.id, preparationRevision: next.revision, sessionId: String(next.data.sessionId), matterId: bindingId,
+          title: input.artifact!.title, reason: input.reason, actionDescription: input.actionDescription,
+          basisFingerprint: String(next.data.fingerprint), evidenceIds: next.evidenceIds, sourceIds, requiredGrants, basisIds: input.basisIds, resultRefs: [next.id],
+          planningProvenance: planningProvenance as PlanningMaterialProvenance[] || [], noteSources, workoutSources });
+        next.data.helpRecordId = help.id;
+        this.repo.db.prepare('UPDATE h_work SET payload=? WHERE id=?').run(JSON.stringify(next), next.id);
+        if (input.presentInConversation || inAppNotify) conversationHelpRef = { id: next.id, revision: next.revision, helpRecordId: help.id };
+        if (choice === 'notify' && !inAppNotify) this.reminders.schedule({ id: next.id, title: input.artifact!.title, detail: '', startsAt: this.repo.clock.now() }, undefined, String(next.data.expiresAt),
+          { kind: 'suggestion', producerId: next.id, helpRecordId: help.id, body: input.artifact!.body,
+            ...(artifactAuthor && typeof artifactAuthor === 'object' && !Array.isArray(artifactAuthor) && typeof artifactAuthor.name === 'string'
+              ? { authorName: artifactAuthor.name } : {}),
+            preparationRef: { id: next.id, revision: next.revision, helpRecordId: help.id },
+            ...(typeof next.data.sessionId === 'string' ? { sessionId: next.data.sessionId } : {}) });
+      }
+      if (opportunity.status === 'notification_queued' && choice !== 'notify') this.reminders.cancel(next.id);
+      let mandateUpdate: { id: string; previousRevision: number; revision: number; operation: 'material_wakes' } | undefined;
+      if (binding.data.type === 'attention_focus') {
+        const current = this.repo.work(handle, undefined, binding.id)[0]!;
+        const wakes = ((current.data.materialWakes || []) as unknown as MaterialWake[]).filter(wake => wake.opportunityId !== next.id);
+        const expiry = Math.min(...materialExpiries.map(Date.parse), ...supplied.flatMap(event => event!.label.expiresAt ? [Date.parse(event!.label.expiresAt)] : []),
+          ...(reused ? (opportunity.data.material as { expiresAt?: string }[]).flatMap(item => item.expiresAt ? [Date.parse(item.expiresAt)] : []) : []),
+          ...(choice === 'wait' ? opportunity.evidenceIds.flatMap(id => { const event = this.repo.evidence(handle, id); return event?.speaker === 'external' && event.label.expiresAt ? [Date.parse(event.label.expiresAt)] : []; }) : []));
+        // An ordinary wait can resume the same readable opportunity. If the
+        // source expires first (or that resume was missed), retain a separate
+        // time node which requests a fresh read, without extending old evidence.
+        const wakeAt = choice === 'wait' ? Math.max(expiry, Date.parse(String(next.data.reconsiderAt))) : expiry;
+        if (['prepare', 'ask', 'notify', 'wait'].includes(choice) && Number.isFinite(wakeAt) && wakeAt > Date.parse(this.repo.clock.now()) &&
+          (!current.data.until || wakeAt < Date.parse(String(current.data.until)))) {
+          const objectId = (next.data.facts as { objectId?: string })?.objectId;
+          wakes.push({ at: new Date(wakeAt).toISOString(), opportunityId: next.id, opportunityRevision: next.revision, ...(objectId ? { objectId } : {}),
+            ...(choice === 'wait' ? { kind: 'wait', reconsiderAt: String(next.data.reconsiderAt) } : {}) });
+        }
+        if (canonical(current.data.materialWakes || []) !== canonical(wakes)) {
+          const updated = this.work.update(handle, current.id, current.revision, { data: { ...current.data, materialWakes: z.json().parse(wakes) } });
+          mandateUpdate = { id: current.id, previousRevision: current.revision, revision: updated.revision, operation: 'material_wakes' };
+        }
+      }
+      return { status: next.status, id: next.id, revision: next.revision, choice, artifactExists: !!next.data.artifact, ...(mandateUpdate ? { mandateUpdate } : {}), ...(conversationHelpRef ? { conversationHelpRef } : {}), reason: inCurrentReply && conversationHelpRef
+        ? "This material is attached to the current reply. Actual UI observation will record its display time."
+        : showExisting ? "This reuses the original material through the current conversation. Earlier delivery records remain; actual display needs separate UI observation."
+          : duplicate ? "This is still the same previously addressed reason. Earlier help remains beside its original record."
+            : onceExhausted ? onceCoverageUnknown ? "This earlier one-time agreement lacks a complete fulfillment record. Actual material remains quietly in place."
+              : onceUnknown ? "The previous notification result is still unconfirmed. The once-only agreement preserves that pending receipt."
+              : "The once-only agreement already has a real publication, display, or channel-submission record."
+              : inAppOnly ? "The current agreement is quiet preparation; material remains in the application." : input.reason };
+    });
+  }
+
+  expire() {
+    this.basis.recheck();
+    const now = this.repo.clock.now();
+    this.repo.write(() => {
+      const scope = this.policy.hostScope();
+      for (const record of this.records(scope, 'help_opportunity', activeChoices)) {
+        const binding = this.repo.work(scope, undefined, String(record.data.bindingId))[0];
+        const material = record.data.material as { noteId?: string; noteRevision?: number; versions?: MaterialVersion[]; expiresAt?: string }[] | undefined;
+        const facts = record.data.facts as { objectId?: string; revision?: number; operation?: string; value?: { done?: boolean } } | undefined;
+        const noteChanged = material?.some(item => item.noteId && !this.noteCurrent(item.noteId, Number(item.noteRevision))) ||
+          record.data.category === 'notes' && !!facts?.objectId && Number.isSafeInteger(facts.revision) && !this.noteCurrent(facts.objectId, Number(facts.revision), facts.operation === 'tombstone' ? 'deleted' : 'active');
+        const agendaChanged = record.data.category === 'agenda' && !!facts?.objectId && Number.isSafeInteger(facts.revision) &&
+          !this.versionsCurrent(scope, [{ kind: 'agenda', id: facts.objectId, revision: Number(facts.revision), state: facts.operation === 'tombstone' ? 'deleted' : facts.value?.done ? 'done' : 'present' }]);
+        const materialChanged = ['prepared', 'question_ready', 'notification_queued'].includes(record.status) && record.data.materialContractVersion !== 1 ||
+          material?.some(item => item.expiresAt && Date.parse(item.expiresAt) <= Date.parse(now) || !this.versionsCurrent(scope, item.versions || []));
+        if (binding && this.bindingActive(scope, binding) && !noteChanged && !agendaChanged && !materialChanged) continue;
+        this.reminders.cancel(record.id);
+        this.work.update(scope, record.id, record.revision, { status: 'stale', data: { ...record.data, invalidationReason: noteChanged ? 'note_changed' : agendaChanged ? 'agenda_changed' : materialChanged ? 'material_changed' : 'binding_inactive', artifact: null } });
+      }
+      this.repo.db.prepare(`UPDATE h_work SET status='candidate',revision=revision+1,payload=json_set(payload,'$.status','candidate','$.revision',revision+1,'$.data.reconsiderAt',?)
+        WHERE owner=? AND workspace=? AND json_extract(payload,'$.data.type')='help_opportunity' AND status='paused'
+        AND julianday(json_extract(payload,'$.data.expiresAt'))>julianday(?)
+        AND EXISTS(SELECT 1 FROM h_work rule WHERE rule.id=json_extract(h_work.payload,'$.data.pausedBy') AND (rule.status='inactive' OR julianday(json_extract(rule.payload,'$.data.until'))<=julianday(?)))`)
+        .run(now, this.repo.identity.principalId, this.repo.identity.workspaceId, now, now);
+      const staleScopes = this.repo.db.prepare(`SELECT id FROM h_work WHERE owner=? AND workspace=? AND json_extract(payload,'$.data.type')='help_opportunity' AND status IN ('candidate','waiting','prepared','question_ready','notification_queued') AND json_extract(payload,'$.data.scope.epoch')!=?`).all(this.repo.identity.principalId, this.repo.identity.workspaceId, this.repo.epoch);
+      for (const row of staleScopes) {
+        this.reminders.cancel(String(row.id));
+        this.repo.db.prepare("UPDATE h_work SET status='stale',revision=revision+1,payload=json_set(payload,'$.status','stale','$.revision',revision+1,'$.data.invalidationReason','privacy_scope_changed','$.data.artifact',NULL) WHERE id=?").run(String(row.id));
+      }
+      const rows = this.repo.db.prepare(`SELECT id FROM h_work WHERE owner=? AND workspace=? AND json_extract(payload,'$.data.type')='help_opportunity'
+        AND status IN ('candidate','waiting','prepared','question_ready','notification_queued') AND julianday(json_extract(payload,'$.data.expiresAt'))<=julianday(?)`).all(this.repo.identity.principalId, this.repo.identity.workspaceId, now);
+      for (const row of rows) {
+        this.reminders.cancel(String(row.id));
+        this.repo.db.prepare("UPDATE h_work SET status='expired',revision=revision+1,payload=json_set(payload,'$.status','expired','$.revision',revision+1,'$.data.artifact',NULL) WHERE id=?").run(String(row.id));
+      }
+      const focuses = this.repo.db.prepare(`SELECT id FROM h_work WHERE owner=? AND workspace=? AND json_extract(payload,'$.data.type')='attention_focus' AND status='active' AND julianday(json_extract(payload,'$.data.until'))<=julianday(?)`).all(this.repo.identity.principalId, this.repo.identity.workspaceId, now);
+      for (const row of focuses) {
+        this.repo.invalidate(String(row.id), 'focus_expired');
+        this.repo.db.prepare("UPDATE h_work SET status='expired',revision=revision+1,payload=json_set(payload,'$.status','expired','$.revision',revision+1) WHERE id=?").run(String(row.id));
+        this.repo.db.prepare("UPDATE h_watches SET status='inactive' WHERE goal_id=?").run(String(row.id));
+      }
+    });
+  }
+
+  available(handle: ScopeHandle, matterId?: string) {
+    this.expire();
+    return this.repo.workData(handle, ['help_opportunity'], { matterId, statuses: ['prepared', 'question_ready', 'notification_queued'], limit: 5 }).filter(item => !!item.data.artifact);
+  }
+
+  /** A saved notify decision is not a display receipt. Only its original
+   * in-app channel may publish this exact prepared version into its session. */
+  conversationPublication(handle: ScopeHandle, ref: { id: string; revision: number; helpRecordId: string }) {
+    this.expire();
+    if (this.preferences?.().initiative !== 'when_useful' || this.preferences?.().followup !== 'meaningful_change')
+      throw new HarnessError('initiative_quiet', "Initiative preferences changed. The earlier prepared message was not sent.");
+    const record = this.repo.work(handle, undefined, ref.id)[0];
+    if (!record || record.revision !== ref.revision || record.status !== 'prepared' || record.data.type !== 'help_opportunity'
+      || record.data.choice !== 'notify' || record.data.channel !== 'in_app' || record.data.presentationChannel !== 'conversation'
+      || record.data.helpRecordId !== ref.helpRecordId || Date.parse(String(record.data.expiresAt)) <= Date.parse(this.repo.clock.now()))
+      throw new HarnessError('attention_publication_changed', "The original material or revision changed. Old content was not sent.");
+    const binding = this.repo.work(handle, undefined, String(record.data.bindingId))[0];
+    if (!binding || !this.bindingActive(handle, binding) || binding.data.sessionId !== record.data.sessionId
+      || this.rules(handle, binding.id, String((record.data.facts as any)?.objectId || ''), record.id)
+        .some(rule => ['pause', 'stop'].includes(String(rule.data.operation))))
+      throw new HarnessError('attention_stopped', "The original request stopped or changed. Old preparation was not sent.");
+    const authority = binding.data.source;
+    const eventId = authority && typeof authority === 'object' && !Array.isArray(authority)
+      && typeof authority.eventId === 'string' ? authority.eventId : undefined;
+    const event = eventId ? this.repo.evidence(handle, eventId) : undefined;
+    if (binding.data.type !== 'attention_focus' || !event || event.speaker !== 'user' || event.authority !== 'user_statement'
+      || !resolveSourceQuote(event, authority))
+      throw new HarnessError('attention_source_changed', "The original exact request cannot currently be checked. Old permission was not used for proactive contact.");
+    const artifact = z.object({ title: z.string().min(1), body: z.string().min(1),
+      sceneRefs: z.array(sceneRefSchema).max(3).optional() }).passthrough().parse(record.data.artifact);
+    const author = z.object({ name: z.string().min(1), personaRevision: z.number().int().nonnegative() }).strict().parse(record.data.artifactAuthor);
+    const sessionId = typeof record.data.sessionId === 'string' ? record.data.sessionId : '';
+    if (!sessionId) throw new HarnessError('attention_session_missing', "The original request has no valid continuation conversation. No other chat was substituted.");
+    return { record, artifact, author, sessionId };
+  }
+
+  recordConversationPublication(handle: ScopeHandle, ref: { id: string; revision: number; helpRecordId: string }, messageId: string) {
+    const { record } = this.conversationPublication(handle, ref);
+    if (record.data.inAppDelivery) throw new HarnessError('attention_already_published', "This preparation already has a delivery record in its original conversation and was not sent again.");
+    const payload = { ...record, data: { ...record.data, inAppDelivery: {
+      messageId, opportunityRevision: ref.revision, helpRecordId: ref.helpRecordId, publishedAt: this.repo.clock.now(),
+    } } };
+    // This host receipt is part of the same transaction as the decision and
+    // message, not a new material revision or a claim that anybody saw it.
+    const written = this.repo.db.prepare('UPDATE h_work SET payload=? WHERE id=? AND revision=?')
+      .run(JSON.stringify(payload), record.id, record.revision);
+    if (written.changes !== 1) throw new HarnessError('attention_publication_changed', "The preparation changed again before saving. Old content was not sent.");
+  }
+
+  /** Search permitted records before paging matches. The caller projects only
+   * discovery metadata; exact reads and adoption keep their own fences. */
+  discoverHelp(handle: ScopeHandle, raw: z.input<typeof helpDiscoveryInput>, eligible?: readonly WorkRecord[]) {
+    const input = helpDiscoveryInput.parse(raw);
+    this.expire();
+    const terms = [...new Set((input.query || '').normalize('NFKC').trim().toLowerCase().split(/\s+/).filter(Boolean))];
+    const from = input.from ? Date.parse(input.from) : -Infinity, to = input.to ? Date.parse(input.to) : Infinity;
+    const cached = new Map<string, WorkRecord | undefined>();
+    const read = (objectId: string) => {
+      if (!cached.has(objectId)) cached.set(objectId, this.repo.work(handle, undefined, objectId)[0]);
+      return cached.get(objectId);
+    };
+    if (input.relatedTo && !read(input.relatedTo)) return { items: [], hasMore: false, nextOffset: null };
+    const related = (record: WorkRecord) => {
+      if (!input.relatedTo) return true;
+      const visited = new Set<string>(), pending = [record.id];
+      cached.set(record.id, record);
+      while (pending.length) {
+        const objectId = pending.pop()!;
+        if (visited.has(objectId)) continue;
+        visited.add(objectId);
+        if (objectId === input.relatedTo) return true;
+        const current = read(objectId);
+        if (!current) continue;
+        for (const key of ['bindingId', 'matterId']) if (typeof current.data[key] === 'string') pending.push(current.data[key]);
+      }
+      return false;
+    };
+    const found: WorkRecord[] = [];
+    let matched = 0;
+    const readPage = (offset: number) => this.repo.workData(handle, ['help_opportunity'], {
+      statuses: input.statuses || activeChoices, offset, limit: 100, respectSourceBindings: true,
+    });
+    const pages = function* () {
+      // Background callers retain the existing fair pending order as well as
+      // its due-only subset; filtering must not silently reorder that queue.
+      if (eligible) { yield eligible; return; }
+      for (let offset = 0; ; offset += 100) {
+        const rows = readPage(offset);
+        yield rows;
+        if (rows.length < 100) return;
+      }
+    };
+    for (const rows of pages()) {
+      for (const record of rows) {
+        if (input.statuses && !input.statuses.includes(record.status as typeof helpDiscoveryStatuses[number])) continue;
+        if (terms.length) {
+          const artifact = record.data.artifact as { title?: unknown; body?: unknown } | null;
+          const text = [record.title, artifact?.title, artifact?.body].filter(value => typeof value === 'string').join(' ').normalize('NFKC').toLowerCase();
+          if (!terms.some(term => text.includes(term))) continue;
+        }
+        if (!related(record)) continue;
+        const at = Date.parse(String(record.data.decidedAt || record.data.recordedAt || ''));
+        if ((input.from || input.to) && (!Number.isFinite(at) || at < from || at >= to)) continue;
+        if (matched++ < input.offset) continue;
+        found.push(record);
+        if (found.length > input.limit) return { items: found.slice(0, input.limit), hasMore: true, nextOffset: input.offset + input.limit };
+      }
+    }
+    return { items: found, hasMore: false, nextOffset: null };
+  }
+
+  private probeArguments(probe: z.infer<typeof attentionControlInput>['probe']) {
+    if (!probe) return {};
+    if (!probe.relativeDate) return probe.arguments;
+    const { argument, offsetDays, timeZone } = probe.relativeDate;
+    return { ...probe.arguments, [argument]: addDate(dateInZone(this.repo.clock.now(), timeZone), offsetDays) };
+  }
+
+  /** Persisted nodes wake semantic review once. Polling itself creates no model
+   * work. Source probes retain their own bounded, read-only refresh budget. */
+  async scan(handle: ScopeHandle, signal: AbortSignal) {
+    this.expire();
+    if (this.preferences?.().followup === 'on_request') return [];
+    this.resumeChanges?.(handle);
+    const scope = this.policy.validate(handle), now = this.repo.clock.now();
+    const focuses = this.records(handle, 'attention_focus', ['active']).filter(focus => this.bindingActive(handle, focus))
+      .sort((a, b) => Date.parse(String(a.data.nextScanAt)) - Date.parse(String(b.data.nextScanAt)));
+    for (const original of focuses) {
+      let focus = this.repo.work(handle, undefined, original.id)[0]!;
+      if (this.rules(handle, focus.id).some(rule => ['pause', 'stop'].includes(String(rule.data.operation)))) continue;
+      const source = focus.data.source as { eventId: string };
+      const completed = (focus.data.completedWakes || []) as string[];
+      const due = ((focus.data.wakeAt || []) as string[]).filter(at => !completed.includes(at) && Date.parse(at) <= Date.parse(now));
+      const nodes = [...(focus.data.discoveryPending ? ['mandate_started'] : []), ...due];
+      for (const node of nodes) {
+        const expiresAt = String(focus.data.until || new Date(Date.parse(now) + 7 * 86400000).toISOString());
+        const opportunity = this.offer(handle, { bindingId: focus.id, watchId: 'wake:' + focus.id, evidenceId: source.eventId,
+          category: String(focus.data.eventCategory), title: focus.title, noveltyKey: `${focus.id}:${node}`, expiresAt,
+          facts: { trigger: node === 'mandate_started' ? 'mandate_started' : 'time_window_opened', scheduledAt: node, rule: focus.data.rule, meaning: "This is an entrusted request or time point, not a new external fact. Check current conditions before preparing." } });
+        if (!opportunity && !this.records(handle, 'help_opportunity').some(item => item.data.noveltyKey === `${focus.id}:${node}`)) continue;
+        focus = this.work.update(handle, focus.id, focus.revision, { data: { ...focus.data, ...(node === 'mandate_started' ? { discoveryPending: false } : { completedWakes: [...new Set([...(focus.data.completedWakes as string[] || []), node])] }) } });
+      }
+      const materialWakes = (focus.data.materialWakes || []) as unknown as MaterialWake[], remainingWakes: MaterialWake[] = [];
+      for (const wake of materialWakes) {
+        if (Date.parse(wake.at) > Date.parse(now)) { remainingWakes.push(wake); continue; }
+        const rules = this.rules(handle, focus.id, wake.objectId, wake.opportunityId);
+        if (rules.some(rule => rule.data.operation === 'pause')) { remainingWakes.push(wake); continue; }
+        const prior = this.repo.db.prepare('SELECT status FROM h_work WHERE id=? AND owner=? AND workspace=?').get(wake.opportunityId, scope.principalId, scope.workspaceId);
+        if (!prior || ['dismissed', 'declined', 'cancelled'].includes(String(prior.status)) || rules.some(rule => rule.data.operation === 'stop')) continue;
+        const contacts = this.cooperation.interventions(handle, focus.id);
+        this.seedOnce(handle, contacts);
+        if (rules.some(rule => this.onceHeld(rule, contacts))) continue;
+        const noveltyKey = `${wake.kind === 'wait' ? 'wait-refresh' : 'material-expired'}:${wake.opportunityId}:${wake.opportunityRevision}:${wake.at}`;
+        const opportunity = this.offer(handle, { bindingId: focus.id, watchId: 'wake:' + focus.id, evidenceId: source.eventId,
+          category: String(focus.data.eventCategory), title: focus.title, noveltyKey,
+          expiresAt: String(focus.data.until || new Date(Date.parse(now) + 7 * 86400000).toISOString()),
+          facts: { trigger: wake.kind === 'wait' ? 'wait_refresh' : 'material_expired', scheduledAt: wake.at, previousOpportunityId: wake.opportunityId, previousRevision: wake.opportunityRevision,
+            ...(wake.reconsiderAt ? { requestedReconsiderAt: wake.reconsiderAt } : {}), ...(wake.objectId ? { objectId: wake.objectId } : {}), rule: focus.data.rule,
+            meaning: wake.kind === 'wait' ? "Reassessment is due, the original material expired, or the original review is incomplete. Refresh current facts before deciding to wait, prepare, or end. Do not reuse old evidence or notify automatically." : "The original preparation expired. Source business values may be unchanged; obtain currently valid material before deciding whether preparation remains worthwhile. Do not notify automatically." } });
+        if (!opportunity && !this.records(handle, 'help_opportunity').some(item => item.data.noveltyKey === noveltyKey)) remainingWakes.push(wake);
+      }
+      if (remainingWakes.length !== materialWakes.length) focus = this.work.update(handle, focus.id, focus.revision, { data: { ...focus.data, materialWakes: z.json().parse(remainingWakes) } });
+      const pending = focus.data.pendingProbe as unknown as HelpSignal | undefined;
+      if (pending && (Date.parse(pending.expiresAt) <= Date.parse(now) || !this.repo.evidence(handle, pending.evidenceId))) this.work.update(handle, focus.id, focus.revision, { data: { ...focus.data, pendingProbe: null, nextScanAt: now } });
+      else if (pending && this.offer(handle, pending)) this.work.update(handle, focus.id, focus.revision, { data: { ...focus.data, pendingProbe: null, lastFingerprint: pending.noveltyKey } });
+    }
+    for (const original of focuses.filter(focus => focus.data.probe && !focus.data.pendingProbe && Date.parse(String(focus.data.nextScanAt)) <= Date.parse(now)).slice(0, 2)) {
+      const focus = this.repo.work(handle, undefined, original.id)[0]!;
+      if (this.rules(handle, focus.id).some(rule => ['pause', 'stop'].includes(String(rule.data.operation)))) continue;
+      if (focus.data.pendingProbe) continue;
+      const probe = focus.data.probe as NonNullable<z.infer<typeof attentionControlInput>['probe']>;
+      if (probe.capability === 'research.search' && focus.data.publicProbeHash !== createHash('sha256').update(canonical(probe)).digest('hex')) continue;
+      const sources = (focus.data.sources as string[]).filter(source => scope.sources.includes(source));
+      const bounded = this.policy.narrow(handle, { sources, infer: false, grants: scope.grants.filter(grant => grant.endsWith(':read')) });
+      let observation: Awaited<ReturnType<CapabilityBroker['invoke']>>;
+      try { observation = await this.broker.invoke(bounded, probe.capability, this.probeArguments(probe), signal, { refresh: true }); }
+      catch (error) {
+        signal.throwIfAborted(); this.policy.validate(handle);
+        const current = this.repo.work(handle, undefined, focus.id)[0];
+        if (current?.revision === focus.revision && this.bindingActive(handle, current)) this.work.update(handle, current.id, current.revision, { data: { ...current.data,
+          nextScanAt: new Date(Date.parse(this.repo.clock.now()) + 300000).toISOString(), lastProbeFailure: { at: this.repo.clock.now(), code: error instanceof HarnessError ? error.code : 'probe_failed' } } });
+        continue;
+      }
+      this.policy.validate(handle); signal.throwIfAborted();
+      const current = this.repo.work(handle, undefined, focus.id)[0];
+      if (!current || current.revision !== focus.revision || !this.bindingActive(handle, current)) continue;
+      // Weather's observedAt is the fetch receipt, not a forecast publication
+      // or a changed forecast value. Its validity is handled by material wakes.
+      const data = probe.capability === 'weather.lookup' && observation.data && typeof observation.data === 'object'
+        ? { ...observation.data, observedAt: undefined } : observation.data;
+      const facts = JSON.parse(JSON.stringify({ status: observation.status, data, coverage: observation.coverage },
+        (key, value) => ['fetchedAt', 'retrievedAt', 'queriedAt', 'computedAt'].includes(key) ? undefined : value));
+      const fingerprint = createHash('sha256').update(canonical(facts)).digest('hex');
+      const updated = this.work.update(handle, focus.id, focus.revision, { data: { ...focus.data, nextScanAt: new Date(Date.parse(this.repo.clock.now()) + 1800000).toISOString() } });
+      if (focus.data.lastFingerprint === fingerprint || !observation.data || !['fresh', 'partial', 'known_absent'].includes(observation.status)) continue;
+      const eventId = randomUUID(), now = this.repo.clock.now();
+      const focusExpiry = String(focus.data.until || new Date(Date.parse(now) + 86400000).toISOString());
+      const sourceExpiry = observation.expiresAt && Date.parse(observation.expiresAt);
+      const expiresAt = sourceExpiry && Number.isFinite(sourceExpiry)
+        ? new Date(Math.min(Date.parse(focusExpiry), sourceExpiry)).toISOString() : focusExpiry;
+      const event = this.repo.ingest(handle, { id: eventId, ownerId: scope.principalId, workspaceId: scope.workspaceId, subjectId: scope.subjectId, worldId: scope.worldId, sourceId: observation.sourceId,
+        contentVersion: 1, text: canonical(observation), speaker: 'external', kind: 'tool_result', authority: 'source_record', roots: [eventId],
+        label: { ...personalLabel, infer: false, expiresAt }, receivedAt: now, status: 'active' });
+      const change: HelpSignal = { bindingId: focus.id, watchId: 'scan:' + focus.id, evidenceId: event.id, category: String(focus.data.eventCategory), title: focus.title,
+        facts: { capability: probe.capability, observation: observation.data }, noveltyKey: fingerprint, expiresAt };
+      const offered = this.offer(handle, change);
+      this.work.update(handle, focus.id, updated.revision, { data: { ...updated.data, ...(offered ? { lastFingerprint: fingerprint, pendingProbe: null } : { pendingProbe: z.json().parse(change) }) } });
+    }
+    return [] as HelpSignal[];
+  }
+}

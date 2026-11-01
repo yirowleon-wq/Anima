@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "id": "uika-neutral-presence-time-day-included-v1",
+  "sceneFamily": "literary-room-v1",
+  "character": "uika",
+  "activity": "chat",
+  "purpose": "neutral-presence",
+  "neutralTime": "day",
+  "light": "morning",
+  "palette": "mist",
+  "width": 1536,
+  "height": 1024,
+  "mother": "uika-neutral-presence-time-day-included-v1-mother.png",
+  "background": "uika-neutral-presence-time-day-included-v1-background.png",
+  "mask": "uika-neutral-presence-time-day-included-v1-mask.png",
+  "maskMode": "luminance",
+  "contactMask": "uika-neutral-presence-time-day-included-v1-contact-mask.png",
+  "seat": [
+    0.7734375,
+    0.5654296875
+  ],
+  "ground": [
+    0.6197916666666666,
+    0.8720703125
+  ],
+  "bodyBounds": [
+    0.5227864583333334,
+    0.0927734375,
+    0.87109375,
+    0.8720703125
+  ],
+  "safeTextBoundary": 0.4778645833333333,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "52.278645833333336% 9.27734375%, 87.109375% 9.27734375%, 87.109375% 87.20703125%, 52.278645833333336% 87.20703125%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "e05d24ff0a1943e66e635880d5265fb79a66dac13e8656ca6d820b1b171ebbea",
+      "background": "f603f08f07afdba3b184dc39ddb4d273f210ccc46dbadee4172312e72ac56e97",
+      "F": "53fef61623af81fd6412e648345d8bbc91f2a179b18eaf2f3347f825ac4a3fea",
+      "S": "ca010cca06ad628fba48a5b8434c9ac7256a92dc99bb17230dd072bbad6dfa3e"
+    },
+    "geometryEvidence": {
+      "jointReceiverEnvelope": {
+        "sourcePixels": [
+          750,
+          95,
+          1374,
+          908
+        ],
+        "normalized": [
+          0.48828125,
+          0.0927734375,
+          0.89453125,
+          0.88671875
+        ],
+        "basis": "Read-only original MAX(L(F),L(S)) >32 complete real source receiver envelope, never tightened."
+      },
+      "familyFramingCodeUnchanged": true,
+      "newJointReceiverFitsExistingFamilyOuterBounds": true
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/uika-neutral-presence-time-day-included-v1.json"
+  }
+}

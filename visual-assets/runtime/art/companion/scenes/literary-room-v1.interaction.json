@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "roomFamily": "literary-room-v1",
+  "width": 1536,
+  "height": 1024,
+  "dropTargets": [
+    {
+      "support": "desk-chair",
+      "regions": [
+        {
+          "state": "empty-chair",
+          "polygon": [
+            [
+              219,
+              516
+            ],
+            [
+              280,
+              516
+            ],
+            [
+              302,
+              526
+            ],
+            [
+              284,
+              540
+            ],
+            [
+              215,
+              535
+            ]
+          ],
+          "source": "clear-day-plate",
+          "meaning": "clear exposed right empty-chair seat; excludes the foreground plant and occluded left cloth; not the target person hip"
+        },
+        {
+          "state": "desk-chair-pose",
+          "polygon": [
+            [
+              224,
+              541
+            ],
+            [
+              306,
+              545
+            ],
+            [
+              396,
+              550
+            ],
+            [
+              398,
+              563
+            ],
+            [
+              313,
+              572
+            ],
+            [
+              224,
+              563
+            ]
+          ],
+          "source": "desk-pilot",
+          "meaning": "visible pulled/turned chair seat strip; no air bridge to empty-chair outline"
+        }
+      ]
+    },
+    {
+      "support": "window-seat",
+      "regions": [
+        {
+          "state": "all",
+          "polygon": [
+            [
+              704,
+              533
+            ],
+            [
+              1246,
+              551
+            ],
+            [
+              1280,
+              561
+            ],
+            [
+              1268,
+              578
+            ],
+            [
+              1024,
+              585
+            ],
+            [
+              704,
+              564
+            ]
+          ],
+          "source": "clear-day-plate",
+          "meaning": "inner horizontal cushion top; excludes front cream vertical face, wood cabinet and knitted throw"
+        }
+      ]
+    }
+  ],
+  "hotspots": [
+    {
+      "action": "start-focus",
+      "polygon": [
+        [
+          470,
+          286
+        ],
+        [
+          535,
+          288
+        ],
+        [
+          564,
+          382
+        ],
+        [
+          548,
+          390
+        ],
+        [
+          540,
+          407
+        ],
+        [
+          548,
+          452
+        ],
+        [
+          538,
+          486
+        ],
+        [
+          512,
+          494
+        ],
+        [
+          484,
+          486
+        ],
+        [
+          482,
+          448
+        ],
+        [
+          489,
+          408
+        ],
+        [
+          478,
+          390
+        ],
+        [
+          448,
+          383
+        ]
+      ],
+      "source": "clear-day-plate",
+      "meaning": "ceramic lamp shade/body only; calls existing FocusSession callback"
+    },
+    {
+      "action": "rest",
+      "polygon": [
+        [
+          712,
+          538
+        ],
+        [
+          850,
+          542
+        ],
+        [
+          862,
+          566
+        ],
+        [
+          711,
+          561
+        ]
+      ],
+      "source": "clear-day-plate",
+      "meaning": "visible empty left cushion portion; calls existing rest entrance"
+    }
+  ]
+}

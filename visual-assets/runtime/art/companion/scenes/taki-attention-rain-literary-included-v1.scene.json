@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "id": "taki-attention-rain-literary-included-v1",
+  "sceneFamily": "literary-room-v1",
+  "character": "taki",
+  "activity": "attention",
+  "purpose": "activity",
+  "light": "night",
+  "palette": "rain",
+  "environmentVariant": "rain-night",
+  "width": 1536,
+  "height": 1024,
+  "mother": "taki-attention-rain-literary-included-v1-mother.png",
+  "background": "taki-attention-rain-literary-included-v1-background.png",
+  "mask": "taki-attention-rain-literary-included-v1-mask.png",
+  "maskMode": "luminance",
+  "contactMask": "taki-attention-rain-literary-included-v1-contact-mask.png",
+  "seat": [
+    0.7356770833333334,
+    0.58203125
+  ],
+  "ground": [
+    0.6276041666666666,
+    0.8515625
+  ],
+  "bodyBounds": [
+    0.552734375,
+    0.130859375,
+    0.8255208333333334,
+    0.861328125
+  ],
+  "safeTextBoundary": 0.5260416666666667,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "55.2734375% 13.0859375%, 82.55208333333334% 13.0859375%, 82.55208333333334% 86.1328125%, 55.2734375% 86.1328125%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "90a756337fbfb434a9de07ee77f0148b8e5619b58b88c8772ee2ed4f5355f912",
+      "background": "bda179e8aff5ab5e3649c9f6b6f1d55cb4fd9293e23288e31b3c91abf34fd042",
+      "F": "0be770c8723ff41ca7f4b15b4271b1dfb2cd14b4d8c6af164dc985007a664cf5",
+      "S": "be6d80af7f82835bab83527cdbefd3e2fc106ea558a38c4113465fceeaf8d751"
+    },
+    "geometryEvidence": {
+      "jointReceiverEnvelope": {
+        "sourcePixels": [
+          824,
+          134,
+          1268,
+          882
+        ],
+        "normalized": [
+          0.5364583333333334,
+          0.130859375,
+          0.8255208333333334,
+          0.861328125
+        ],
+        "basis": "sRGB Rec.709 luminance; F >32 and MAX(L(F),L(S)) >32 for envelope metadata only. Original continuous mask PNG bytes and runtime luminance remain unchanged."
+      },
+      "newUnionFitsInsideExistingFamilyEnvelope": true,
+      "familyFramingUnchanged": true
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/taki-attention-rain-literary-included-v1.json"
+  }
+}

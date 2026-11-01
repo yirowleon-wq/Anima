@@ -1,0 +1,539 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "e/0",
+      "properties": {
+        "id": "e/0",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -0.0015,
+            -0.0015
+          ],
+          [
+            0,
+            -0.0015
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/1",
+      "properties": {
+        "id": "e/1",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            0,
+            -0.0015
+          ],
+          [
+            0.0015,
+            -0.0015
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/2",
+      "properties": {
+        "id": "e/2",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -0.0015,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/3",
+      "properties": {
+        "id": "e/3",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            0,
+            0
+          ],
+          [
+            0.0015,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/4",
+      "properties": {
+        "id": "e/4",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -0.0015,
+            0.0015
+          ],
+          [
+            0,
+            0.0015
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/5",
+      "properties": {
+        "id": "e/5",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            0,
+            0.0015
+          ],
+          [
+            0.0015,
+            0.0015
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/6",
+      "properties": {
+        "id": "e/6",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -0.0015,
+            -0.0015
+          ],
+          [
+            -0.0015,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/7",
+      "properties": {
+        "id": "e/7",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            -0.0015,
+            0
+          ],
+          [
+            -0.0015,
+            0.0015
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/8",
+      "properties": {
+        "id": "e/8",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            0,
+            -0.0015
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/9",
+      "properties": {
+        "id": "e/9",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            0.0015
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/10",
+      "properties": {
+        "id": "e/10",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            0.0015,
+            -0.0015
+          ],
+          [
+            0.0015,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "e/11",
+      "properties": {
+        "id": "e/11",
+        "kind": "road",
+        "source": "anima:synthetic-campus",
+        "highway": "footway",
+        "name": "Demo Walk",
+        "widthM": 5,
+        "foot": "yes"
+      },
+      "geometry": {
+        "type": "LineString",
+        "coordinates": [
+          [
+            0.0015,
+            0
+          ],
+          [
+            0.0015,
+            0.0015
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "place/library",
+      "properties": {
+        "id": "place/library",
+        "kind": "building",
+        "source": "anima:synthetic-campus",
+        "name": "Demo Library",
+        "heightM": 9,
+        "levels": 2,
+        "volumeBasis": "cartographic-proxy",
+        "modelBasis": "Self-authored synthetic demonstration volume; no real building is represented.",
+        "building": "yes"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -0.00178,
+              0.0015
+            ],
+            [
+              -0.00122,
+              0.0015
+            ],
+            [
+              -0.00122,
+              0.00228
+            ],
+            [
+              -0.00178,
+              0.00228
+            ],
+            [
+              -0.00178,
+              0.0015
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "place/studio",
+      "properties": {
+        "id": "place/studio",
+        "kind": "building",
+        "source": "anima:synthetic-campus",
+        "name": "Demo Studio",
+        "heightM": 9,
+        "levels": 2,
+        "volumeBasis": "cartographic-proxy",
+        "modelBasis": "Self-authored synthetic demonstration volume; no real building is represented.",
+        "building": "yes"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              0.0015,
+              -0.00028
+            ],
+            [
+              0.00228,
+              -0.00028
+            ],
+            [
+              0.00228,
+              0.00028
+            ],
+            [
+              0.0015,
+              0.00028
+            ],
+            [
+              0.0015,
+              -0.00028
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "place/commons",
+      "properties": {
+        "id": "place/commons",
+        "kind": "building",
+        "source": "anima:synthetic-campus",
+        "name": "Demo Commons",
+        "heightM": 9,
+        "levels": 2,
+        "volumeBasis": "cartographic-proxy",
+        "modelBasis": "Self-authored synthetic demonstration volume; no real building is represented.",
+        "building": "yes"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -0.00028,
+              -0.00228
+            ],
+            [
+              0.00028,
+              -0.00228
+            ],
+            [
+              0.00028,
+              -0.0015
+            ],
+            [
+              -0.00028,
+              -0.0015
+            ],
+            [
+              -0.00028,
+              -0.00228
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "place/unknown-hall",
+      "properties": {
+        "id": "place/unknown-hall",
+        "kind": "building",
+        "source": "anima:synthetic-campus",
+        "name": "Demo Unmapped Hall",
+        "heightM": 9,
+        "levels": 2,
+        "volumeBasis": "cartographic-proxy",
+        "modelBasis": "Self-authored synthetic demonstration volume; no real building is represented.",
+        "building": "yes"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              0.00232,
+              0.0017200000000000002
+            ],
+            [
+              0.0028799999999999997,
+              0.0017200000000000002
+            ],
+            [
+              0.0028799999999999997,
+              0.00228
+            ],
+            [
+              0.00232,
+              0.00228
+            ],
+            [
+              0.00232,
+              0.0017200000000000002
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "area/demo-campus",
+      "properties": {
+        "id": "area/demo-campus",
+        "kind": "area",
+        "source": "anima:synthetic-campus",
+        "name": "Synthetic campus demonstration"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -0.0033,
+              -0.0027
+            ],
+            [
+              0.0033,
+              -0.0027
+            ],
+            [
+              0.0033,
+              0.0027
+            ],
+            [
+              -0.0033,
+              0.0027
+            ],
+            [
+              -0.0033,
+              -0.0027
+            ]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "place/meadow",
+      "properties": {
+        "id": "place/meadow",
+        "kind": "landmark",
+        "name": "Demo Meadow",
+        "source": "anima:synthetic-campus"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -0.0021,
+          -0.0015
+        ]
+      }
+    }
+  ]
+}

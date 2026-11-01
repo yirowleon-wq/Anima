@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="studio.anima.location" android:versionCode="6" android:versionName="0.1.5">
+  <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+  <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
+  <application android:label="Anima Location Bridge" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:debuggable="true" android:allowBackup="false" android:supportsRtl="true">
+    <activity android:name=".BridgeActivity" android:exported="true" android:launchMode="singleTop">
+      <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+    </activity>
+    <service android:name=".LocationService" android:exported="false" android:foregroundServiceType="location|health" />
+    <receiver android:name=".StopReceiver" android:exported="true" android:permission="android.permission.DUMP" />
+  </application>
+</manifest>

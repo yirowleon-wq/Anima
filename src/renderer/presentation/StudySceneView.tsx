@@ -1,0 +1,566 @@
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent } from 'react';
+import { ArrowRight, ArrowUpRight, BookOpen, Bookmark, ChevronDown, LoaderCircle, MoreHorizontal, RefreshCw, X } from 'lucide-react';
+import type { Bridge } from '../../shared/types';
+import type { MaterialPage } from '../../shared/materials';
+import { studyExplorationFollowup, studyFollowup, type StudyFocusRef, type StudyFocusTarget, type StudyHistoryReference,
+  type StudyInteraction, type StudyNativeInput, type StudyScene } from '../../shared/study-presentation';
+import { RichText } from '../RichText';
+import { ReadableFocus } from '../LocalTextFocus';
+import { ConversationComposerDockContext, StudyComposerSlot } from '../ConversationComposerDock';
+import { ExplorableStudyView } from './ExplorableStudyView';
+import type { ExplorableStudyValues } from '../../shared/explorable-study';
+import { uiError } from '../ui';
+import { readBookmarkTransfer, useBookmarkTray } from '../SourceBookmarkTray';
+import { SOURCE_BOOKMARK_MIME, type SourceBookmarkReference } from '../../shared/source-bookmark';
+import { useSplitMotion } from '../motion/use-split-motion';
+import { useStudyReadingPosition } from '../study-reading-position';
+import './study-scene.css';
+
+type Followup = { text: string; studyInteraction: StudyInteraction; focusLabel?: string };
+export interface StudySceneViewProps {
+  scene: StudyScene | StudyHistoryReference;
+  sessionId: string;
+  messageId?: string;
+  ownerRevisionHint?: number;
+  ephemeral?: boolean;
+  boundaryKey: string;
+  onFollowup: (value: Followup) => void | Promise<void>;
+  onReadStart?: () => void;
+  api?: Pick<Bridge, 'studyProject' | 'studyRead' | 'materialsRead'> & Partial<Pick<Bridge, 'studyBookmarkPreview' | 'studyBookmarkAccept'>>;
+  onOpenMaterial?: (value: { resourceId: string; page?: number }) => void | Promise<void>;
+  onOpenSource?: (input: StudyNativeInput) => void | Promise<void>;
+  disabled?: boolean;
+}
+
+const studySplitKey = 'anima.study-paper-split.v1';
+function savedStudySplit() {
+  try { const value = Number(localStorage.getItem(studySplitKey)); return value >= 24 && value <= 56 ? value : 32.1; }
+  catch { return 32.1; }
+}
+function studyProblemAddress(origin: StudyScene['problem']['origin']) {
+  // Names and owner read recipes are presentation, not a viewing address.
+  // In particular a private note title must not enter local preferences.
+  const { kind, sourceId, eventId, contentVersion, start, end, resourceId, sha256, page, crop, note, interpretation } = origin;
+  return JSON.stringify({ kind, sourceId, eventId, contentVersion, start, end, resourceId, sha256, page, crop, note, interpretation });
+}
+
+/** Only a layout preference is saved. Both papers and the one real composer
+ * stay mounted while the reader gives an equation more room. */
+function StudyPaperDivider() {
+  const divider = useRef<HTMLDivElement>(null);
+  const [initialValue] = useState(savedStudySplit);
+  const motion = useSplitMotion(initialValue, {
+    bounds: { min: 24, max: 56 },
+    onValue: (value, moving) => {
+      const papers = divider.current?.parentElement;
+      papers?.style.setProperty('--study-source-share', `${value}fr`);
+      papers?.style.setProperty('--study-work-share', `${100-value}fr`);
+      if (moving) papers?.setAttribute('data-resizing', 'true'); else papers?.removeAttribute('data-resizing');
+    },
+    onCommit: value => { try { localStorage.setItem(studySplitKey, String(value)); } catch { /* The papers can still be resized. */ } },
+  });
+  useLayoutEffect(() => {
+    const papers = divider.current?.parentElement;
+    if (!papers) return;
+    let measuredWidth = -1;
+    const measure = () => {
+      const width = papers.getBoundingClientRect().width - 18;
+      if (Math.abs(width - measuredWidth) < .25) return;
+      measuredWidth = width;
+      if (width <= 602) { motion.cancel(); return; }
+      motion.constrain({ min: Math.max(24, 210/width*100), max: Math.min(56, 100-285/width*100) });
+    };
+    const observer = new ResizeObserver(measure); observer.observe(papers); measure();
+    return () => observer.disconnect();
+  }, []);
+  function move(event: PointerEvent<HTMLDivElement>) {
+    const rect = divider.current?.parentElement?.getBoundingClientRect();
+    if (rect?.width) motion.move((event.clientX-rect.left-9)/(rect.width-18)*100, event.pointerId);
+  }
+  return <div ref={divider} className={`study-paper-divider${motion.moving ? ' is-moving' : ''}`} role="separator" tabIndex={0}
+    aria-label="Resize the problem and study sheet" aria-orientation="vertical" aria-valuemin={Math.round(motion.bounds.min)}
+    aria-valuemax={Math.round(motion.bounds.max)} aria-valuenow={Math.round(motion.value)} aria-valuetext={`Problem width ${Math.round(motion.value)}%`}
+    title="Drag to resize; double-click to restore" {...motion.bind} onPointerMove={move}
+    onDoubleClick={() => motion.reset(32.1)}><span aria-hidden="true"><i /><i /></span></div>;
+}
+
+/** Only a current owner response enters the paper. A history reference, a
+ * prior render or an old reply never acts as a material/source permission. */
+export function StudySceneView({ scene, sessionId, messageId, ownerRevisionHint, ephemeral = false, boundaryKey, onFollowup, onReadStart,
+  api = window.anima, onOpenMaterial, onOpenSource, disabled = false }: StudySceneViewProps) {
+  const headingId = useId(), originalId = useId();
+  const root = useRef<HTMLElement>(null);
+  const workRow = useRef<HTMLDivElement>(null), writtenLine = useRef<HTMLDivElement>(null), marginNote = useRef<HTMLElement>(null);
+  const manuscript = useRef<HTMLDivElement>(null), question = useRef<HTMLDivElement>(null);
+  const paperScroll = useRef<{ owner: string; manuscript: number; atEnd: boolean; question: number;
+    questionLeft?: number; manuscriptLeft?: number } | undefined>(undefined);
+  const generation = useRef(0), materialGeneration = useRef(0);
+  const lastShown = useRef<{ owner: string; help?: string; attempt?: string } | undefined>(undefined);
+  const ownerKey = `${sessionId}:${scene.owner.id}`;
+  const requestKey = `${ownerKey}@${scene.owner.revision}:${ownerRevisionHint || scene.owner.revision}:${messageId || ''}:${boundaryKey}`;
+  const liveKey = useRef(requestKey); liveKey.current = requestKey;
+  const [visible, setVisible] = useState(false);
+  const [loaded, setLoaded] = useState<{ key: string; scene: StudyScene }>();
+  const [writingAddress, setWritingAddress] = useState<{ key: string; focus: StudyFocusRef }>();
+  const [pending, setPending] = useState(false), [error, setError] = useState('');
+  const [sourceOpen, setSourceOpen] = useState(false), [sourcePending, setSourcePending] = useState(false);
+  const [source, setSource] = useState<MaterialPage>(), [sourceError, setSourceError] = useState('');
+  const [shellHeight, setShellHeight] = useState(0), [reveal, setReveal] = useState({ initial: true, help: false, attempt: false });
+  const [pencilLink, setPencilLink] = useState<{ width: number; height: number; path: string; x: number; y: number }>();
+  const tray = useBookmarkTray();
+  const bookmarkTarget = `study:${sessionId}:${scene.owner.id}`;
+  const [dropActive, setDropActive] = useState(false);
+  const [hintState, setHintState] = useState<{ key: string; state: 'open' | 'later' | 'down' }>();
+  const hintEphemeral = useRef(ephemeral);
+  const hintFocus = useRef<{ key: string; view: string; state: 'open' | 'later' | 'down'; interaction?: number;
+    previous: Element | null } | undefined>(undefined);
+  const current = loaded?.key === requestKey ? loaded.scene : undefined;
+  const currentReady = !!current;
+  const reading = useStudyReadingPosition({ sessionId, studyId: scene.owner.id,
+    ownerRevision: current?.owner.revision || scene.owner.revision, boundaryKey, enabled: !disabled && !ephemeral });
+  const capturePaperScroll = useCallback(() => {
+    if (!question.current && !manuscript.current) return;
+    const value = { owner: ownerKey, question: question.current?.scrollTop || 0,
+      questionLeft: question.current?.scrollLeft || 0, manuscript: manuscript.current?.scrollTop || 0,
+      manuscriptLeft: manuscript.current?.scrollLeft || 0,
+      atEnd: !manuscript.current || manuscript.current.scrollHeight - manuscript.current.clientHeight - manuscript.current.scrollTop < 20 };
+    paperScroll.current = value;
+    reading.save(value);
+  }, [ownerKey, reading]);
+  const hintKey = current?.help ? `${boundaryKey}:${ownerKey}:${current.help.id}:${studyProblemAddress(current.problem.origin)}` : '';
+  const foldedHint = !!current?.help && current.mode === 'small_hint';
+  const hintOpen = !foldedHint || hintState?.key === hintKey && hintState.state === 'open';
+  const hintDown = foldedHint && hintState?.key === hintKey && hintState.state === 'down';
+  const keepHint = (state: 'open' | 'later' | 'down') => {
+    hintFocus.current = { key: hintKey, view: requestKey, state, interaction: tray?.getInteractionVersion(),
+      previous: document.activeElement };
+    setHintState({ key: hintKey, state });
+    if (ephemeral) return;
+    try { localStorage.setItem(`anima.study-hint.${ownerKey}`, JSON.stringify({ key: hintKey, state })); } catch { /* The hint can still be opened here. */ }
+  };
+  useEffect(() => {
+    const changedRetention = hintEphemeral.current !== ephemeral;
+    hintEphemeral.current = ephemeral;
+    if (changedRetention) setHintState(undefined);
+    // A re-read briefly removes the paper. Keep its in-window choice for the
+    // same exact hint; a temporary conversation must never need storage to
+    // stay open after acceptance. A different owner/help/problem has another key.
+    if (!hintKey) {
+      if (currentReady && !ephemeral) {
+        try { localStorage.removeItem(`anima.study-hint.${ownerKey}`); } catch { /* No current hint needs a stored choice. */ }
+        setHintState(undefined);
+      }
+      return;
+    }
+    if (ephemeral) {
+      if (!changedRetention) setHintState(value => value?.key === hintKey ? value : undefined);
+      return;
+    }
+    try {
+      const kept = JSON.parse(localStorage.getItem(`anima.study-hint.${ownerKey}`) || 'null');
+      const valid = kept?.key === hintKey && ['open', 'later', 'down'].includes(kept.state);
+      if (kept && !valid) localStorage.removeItem(`anima.study-hint.${ownerKey}`);
+      setHintState(valid ? kept : undefined);
+    } catch { setHintState(undefined); }
+  }, [hintKey, ownerKey, ephemeral, currentReady]);
+  useLayoutEffect(() => {
+    const intent = hintFocus.current;
+    if (!intent || !hintState) return;
+    hintFocus.current = undefined;
+    if (intent.key !== hintKey || intent.view !== requestKey || intent.interaction !== tray?.getInteractionVersion()) return;
+    if (intent.state === 'later' && intent.previous?.isConnected && document.activeElement === intent.previous) return;
+    const control = intent.state === 'open' ? marginNote.current?.querySelector<HTMLElement>('.readable-focus')
+      : intent.state === 'down' ? root.current?.querySelector<HTMLElement>('.study-help-choices .study-hint')
+        : root.current?.querySelector<HTMLElement>('.study-hint-envelope button');
+    control?.focus({ preventScroll: true });
+  }, [hintState, hintKey, requestKey, tray]);
+  const referenced = useContext(ConversationComposerDockContext)?.referenceFocus;
+  const referencedPart = current && referenced?.studyId === current.owner.id && referenced.studyRevision === current.owner.revision
+    ? referenced.target : undefined;
+  const writingFocus = writingAddress?.key === requestKey ? writingAddress.focus : undefined;
+
+  const refresh = useCallback(async (options: { focus?: StudyFocusTarget; historyOffset?: number; historyLimit?: number } = {}) => {
+    const turn = ++generation.current, key = requestKey;
+    const papers = root.current?.querySelector<HTMLElement>('.study-desk-papers');
+    if (papers && !papers.classList.contains('is-waiting')) setShellHeight(papers.getBoundingClientRect().height);
+    capturePaperScroll();
+    materialGeneration.current++; setSource(undefined); setSourceOpen(false); setSourcePending(false); setSourceError('');
+    setLoaded(undefined); setPending(true); setError('');
+    try {
+      const next = await api.studyProject({ sessionId, messageId, studyId: scene.owner.id,
+        studyRevision: scene.owner.revision, historyLimit: 8, ...options });
+      if (generation.current !== turn || liveKey.current !== key) return;
+      const prior = lastShown.current;
+      setReveal({ initial: !prior || prior.owner !== ownerKey,
+        help: !prior || prior.owner !== ownerKey || prior.help !== next.help?.id,
+        attempt: !prior || prior.owner !== ownerKey || prior.attempt !== next.learnerAttempt?.id });
+      lastShown.current = { owner: ownerKey, help: next.help?.id, attempt: next.learnerAttempt?.id };
+      setWritingAddress(next.status === 'closed' ? undefined : { key, focus: {
+        sceneId: next.id, sceneRevision: next.revision, studyId: next.owner.id, studyRevision: next.owner.revision,
+        target: next.nextMove.stepId ? { kind: 'next', stepId: next.nextMove.stepId } : { kind: 'next' },
+      } });
+      setLoaded({ key, scene: next }); return next;
+    } catch (problem) {
+      if (generation.current === turn && liveKey.current === key) { setWritingAddress(undefined); setError(uiError(problem)); }
+    } finally { if (generation.current === turn && liveKey.current === key) setPending(false); }
+  }, [api, requestKey, ownerKey, sessionId, messageId, scene.owner.id, scene.owner.revision, capturePaperScroll]);
+
+  const openHint = async () => {
+    const offered = current, key = requestKey, interaction = tray?.getInteractionVersion();
+    if (!offered?.help || pending || disabled) return;
+    const next = await refresh();
+    if (!next || liveKey.current !== key || interaction !== tray?.getInteractionVersion() || next.help?.id !== offered.help.id
+      || studyProblemAddress(next.problem.origin) !== studyProblemAddress(offered.problem.origin)) return;
+    keepHint('open');
+  };
+
+  useEffect(() => {
+    if (!tray || !current || current.status === 'closed' || !api.studyBookmarkPreview || !api.studyBookmarkAccept || disabled) return;
+    const key = requestKey, revision = current.owner.revision;
+    const input = (bookmark: SourceBookmarkReference) => ({ sessionId, messageId, studyId: scene.owner.id,
+      studyRevision: scene.owner.revision, expectedRevision: revision, bookmark });
+    return tray.register({ key: bookmarkTarget, label: current.heading,
+      location: { sessionId, studyId: scene.owner.id, messageId },
+      preview: reference => api.studyBookmarkPreview!(input(reference)),
+      accept: async reference => {
+        if (liveKey.current !== key) throw new Error('This sheet has moved to another target. Place it again.');
+        const next = await api.studyBookmarkAccept!(input(reference));
+        if (liveKey.current !== key) return;
+        setLoaded({ key, scene: next });
+        await refresh();
+      } });
+  }, [tray, current?.owner.revision, current?.status, requestKey, bookmarkTarget, api, disabled, refresh]);
+
+  useEffect(() => {
+    const node = root.current;
+    if (!node || typeof IntersectionObserver === 'undefined') { setVisible(true); return; }
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) { setVisible(true); observer.disconnect(); }
+    }, { rootMargin: '80px' });
+    observer.observe(node); return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    // This also runs on privacy/source boundary changes, with no old body
+    // left on screen while the original source is being opened again.
+    generation.current++; materialGeneration.current++;
+    setLoaded(undefined); setSource(undefined); setSourceOpen(false); setError(''); setSourceError('');
+    if (visible) void refresh();
+    return () => { generation.current++; materialGeneration.current++; };
+  }, [refresh, visible]);
+
+  useLayoutEffect(() => {
+    // A material reader can preserve a standalone equation with inline TeX
+    // delimiters. Give that original equation its own reading scale without
+    // rewriting the material or enlarging mathematics inside ordinary prose.
+    for (const paragraph of question.current?.querySelectorAll('p') || []) {
+      const content = [...paragraph.childNodes].filter(node => node.nodeType !== Node.TEXT_NODE || node.textContent?.trim());
+      paragraph.classList.toggle('study-core-formula', content.length === 1
+        && content[0] instanceof HTMLElement && content[0].classList.contains('katex'));
+    }
+  }, [current?.owner.revision, current?.problem.text, source?.text, sourceOpen]);
+
+  useLayoutEffect(() => {
+    if (!current) return;
+    // Apply the original formula's reading scale first. Restoring against the
+    // temporarily smaller formula clamps a valid horizontal address too soon.
+    const kept = paperScroll.current?.owner === ownerKey ? paperScroll.current : reading.restore();
+    if (question.current && kept) {
+      question.current.scrollTop = kept.question;
+      question.current.scrollLeft = kept.questionLeft || 0;
+    }
+    if (manuscript.current) {
+      manuscript.current.scrollTop = !kept || kept.atEnd && reveal.attempt ? manuscript.current.scrollHeight : kept.manuscript;
+      manuscript.current.scrollLeft = kept?.manuscriptLeft || 0;
+    }
+  }, [current?.owner.revision, current?.learnerAttempt?.id, current?.help?.id, ownerKey, reveal.attempt]);
+
+  useLayoutEffect(() => {
+    const row = workRow.current, attempt = writtenLine.current, note = marginNote.current;
+    if (!row || !attempt || !note || !current?.help || !current.learnerAttempt) { setPencilLink(undefined); return; }
+    let alive = true;
+    const measure = () => {
+      if (!alive) return;
+      const formula = attempt.querySelector<HTMLElement>('.katex') || attempt.querySelector<HTMLElement>('p') || attempt;
+      const frame = row.getBoundingClientRect(), line = formula.getBoundingClientRect();
+      if (!frame.width || !frame.height) return;
+      const clip = manuscript.current?.getBoundingClientRect();
+      if (clip && (line.bottom < clip.top || line.top > clip.bottom)) { setPencilLink(undefined); return; }
+      // The margin follows the current real line on a two-column paper. Its
+      // position is layout only; it never invents a quote or a learner step.
+      const sideBySide = getComputedStyle(row).gridTemplateColumns.trim().split(/\s+/).length > 1;
+      const noteOffset = sideBySide ? Math.max(9, line.top - frame.top - 6) : 0;
+      row.style.setProperty('--study-note-offset', `${noteOffset}px`);
+      const aside = note.getBoundingClientRect();
+      const below = aside.top >= line.bottom - 2;
+      const start = below ? { x: line.left - frame.left + Math.min(line.width * .7, line.width - 12), y: Math.min(line.bottom, clip?.bottom || line.bottom) - frame.top + 3 }
+        : { x: line.right - frame.left + 3, y: line.top - frame.top + Math.min(line.height * .6, 30) };
+      const end = below ? { x: aside.left - frame.left + 23, y: aside.top - frame.top - 5 }
+        : { x: aside.left - frame.left - 5, y: aside.top - frame.top + 26 };
+      const path = below ? `M ${start.x} ${start.y} C ${start.x} ${start.y + 20}, ${end.x - 20} ${end.y - 18}, ${end.x} ${end.y}`
+        : `M ${start.x} ${start.y} C ${start.x + 17} ${start.y - 17}, ${end.x - 16} ${end.y - 8}, ${end.x} ${end.y}`;
+      setPencilLink({ width: frame.width, height: frame.height, path, x: start.x, y: start.y });
+    };
+    const observer = new ResizeObserver(measure); observer.observe(row); observer.observe(attempt); observer.observe(note);
+    attempt.addEventListener('animationend', measure); note.addEventListener('animationend', measure);
+    const paper = manuscript.current; paper?.addEventListener('scroll', measure, { passive: true });
+    measure(); void document.fonts.ready.then(measure);
+    return () => { alive = false; observer.disconnect(); attempt.removeEventListener('animationend', measure); note.removeEventListener('animationend', measure); paper?.removeEventListener('scroll', measure); };
+  }, [current?.owner.revision, current?.help?.id, current?.learnerAttempt?.id, requestKey, hintOpen]);
+
+  const sameVisibleStep = (before: StudyScene, next: StudyScene) => before.owner.revision === next.owner.revision
+    && before.mode === next.mode && before.help?.id === next.help?.id;
+
+  const act = async (actionId: StudyScene['actions'][number]['id'], text?: string) => {
+    if (!current || pending || disabled) return;
+    const before = current, key = requestKey, interaction = tray?.getInteractionVersion(), next = await refresh();
+    if (!next || key !== liveKey.current || interaction !== tray?.getInteractionVersion() || !sameVisibleStep(before, next)) return;
+    setPending(true);
+    try { await onFollowup({ ...studyFollowup(next, actionId), ...(text ? { text } : {}) }); }
+    catch (problem) { if (liveKey.current === key) setError(uiError(problem)); }
+    finally { if (liveKey.current === key) setPending(false); }
+  };
+  const requestSmallerHint = () => void act('hint', 'Make this hint smaller: give me one question that helps me keep thinking, without revealing the later steps yet.');
+
+  const referencePart = async (target: StudyFocusTarget) => {
+    if (!current || pending || disabled) return;
+    const before = current, key = requestKey, turn = generation.current, interaction = tray?.getInteractionVersion();
+    let cleared = false;
+    setPending(true);
+    try {
+      // Reopen via the original message address. Its authorized old Scene can
+      // project a newer owner; that newer revision is not a stored message ref.
+      // Compare the returned current owner before carrying this actual point.
+      const next = await api.studyProject({ sessionId, messageId, studyId: scene.owner.id,
+        studyRevision: scene.owner.revision, historyLimit: 8 });
+      if (key !== liveKey.current || generation.current !== turn || interaction !== tray?.getInteractionVersion()) return;
+      if (!sameVisibleStep(before, next)
+        || target.kind === 'attempt' && !next.learnerLines.some(line => line.id === target.attemptId)
+        || target.kind === 'help' && next.help?.id !== target.stepId) { await refresh(); return; }
+      await onFollowup({ text: '', focusLabel: target.kind === 'attempt' ? 'This line I wrote'
+      : target.kind === 'help' ? 'The current hint' : target.kind === 'problem' ? 'The original problem' : 'Continue from this point',
+      studyInteraction: { kind: 'reference', focus: {
+      sceneId: next.id, sceneRevision: next.revision, studyId: next.owner.id, studyRevision: next.owner.revision, target,
+    } } }); }
+    catch (problem) { if (liveKey.current === key && generation.current === turn) {
+      generation.current++; materialGeneration.current++;
+      cleared = true;
+      setLoaded(undefined); setWritingAddress(undefined); setSource(undefined); setSourceOpen(false); setSourcePending(false);
+      setError(uiError(problem));
+    } }
+    finally { if (liveKey.current === key && (generation.current === turn || cleared)) setPending(false); }
+  };
+
+  const park = async () => {
+    if (!current || pending || disabled) return;
+    const before = current, key = requestKey, interaction = tray?.getInteractionVersion(), next = await refresh();
+    if (!next || key !== liveKey.current || interaction !== tray?.getInteractionVersion() || !sameVisibleStep(before, next)) return;
+    const target: StudyFocusTarget = next.nextMove.stepId ? { kind: 'next', stepId: next.nextMove.stepId } : { kind: 'next' };
+    setPending(true);
+    try { await onFollowup({ text: 'Stop here for today and save this position so we can continue from it.', studyInteraction: { kind: 'reference',
+      focus: { sceneId: next.id, sceneRevision: next.revision, studyId: next.owner.id, studyRevision: next.owner.revision, target } } }); }
+    catch (problem) { if (liveKey.current === key) setError(uiError(problem)); }
+    finally { if (liveKey.current === key) setPending(false); }
+  };
+
+  const continueExploration = async (values: ExplorableStudyValues) => {
+    if (!current?.help?.exploration || pending || disabled || current.status === 'closed') return;
+    const before = current, key = requestKey, turn = generation.current, interaction = tray?.getInteractionVersion();
+    let cleared = false;
+    setPending(true);
+    try {
+      // The current graph and local condition stay put while this exact
+      // teaching step is reopened. The original message authorizes the read;
+      // its stored address may precede the current owner being compared here.
+      const next = await api.studyProject({ sessionId, messageId, studyId: scene.owner.id,
+        studyRevision: scene.owner.revision, historyLimit: 8 });
+      if (key !== liveKey.current || generation.current !== turn || interaction !== tray?.getInteractionVersion()) return;
+      if (!sameVisibleStep(before, next)) { await refresh(); return; }
+      await onFollowup(studyExplorationFollowup(next, values));
+    } catch (problem) {
+      if (liveKey.current === key && generation.current === turn) {
+        generation.current++; materialGeneration.current++; cleared = true;
+        setLoaded(undefined); setWritingAddress(undefined); setSource(undefined); setSourceOpen(false); setSourcePending(false);
+        setError(uiError(problem));
+      }
+    } finally { if (liveKey.current === key && (generation.current === turn || cleared)) setPending(false); }
+  };
+
+  const openOriginal = async () => {
+    if (!current || pending || disabled) return;
+    if (sourceOpen) { materialGeneration.current++; setSourceOpen(false); setSource(undefined); return; }
+    const before = current, key = requestKey, interaction = tray?.getInteractionVersion(), next = await refresh();
+    if (!next || key !== liveKey.current || interaction !== tray?.getInteractionVersion() || !sameVisibleStep(before, next)) return;
+    const origin = next.problem.origin;
+    if (origin.kind === 'note' || next.bookmark && onOpenSource) {
+      try { await onOpenSource?.({ sessionId, messageId, studyId: scene.owner.id, studyRevision: scene.owner.revision }); }
+      catch (problem) { if (liveKey.current === key) setError(uiError(problem)); }
+      return;
+    }
+    if (!origin.resourceId) return;
+    if (onOpenMaterial) {
+      try { await onOpenMaterial({ resourceId: origin.resourceId, page: origin.page }); }
+      catch (problem) { if (liveKey.current === key) setError(uiError(problem)); }
+      return;
+    }
+    const turn = ++materialGeneration.current;
+    setSourceOpen(true); setSourcePending(true); setSourceError('');
+    try {
+      const page = await api.materialsRead({ target: { kind: 'saved', resourceId: origin.resourceId },
+        ...(origin.page ? { page: origin.page, view: 'page' as const } : { view: 'text' as const, offset: origin.start || 0 }) });
+      if (materialGeneration.current === turn && liveKey.current === key) setSource(page);
+    } catch (problem) { if (materialGeneration.current === turn && liveKey.current === key) setSourceError(uiError(problem)); }
+    finally { if (materialGeneration.current === turn && liveKey.current === key) setSourcePending(false); }
+  };
+
+  const removeBookmark = async () => {
+    if (!current || !api.studyBookmarkAccept || pending || disabled) return;
+    const key = requestKey; setPending(true); setError('');
+    try {
+      const next = await api.studyBookmarkAccept({ sessionId, messageId, studyId: scene.owner.id,
+        studyRevision: scene.owner.revision, expectedRevision: current.owner.revision, bookmark: null });
+      if (liveKey.current === key) setLoaded({ key, scene: next });
+    } catch (problem) { if (liveKey.current === key) setError(uiError(problem)); }
+    finally { if (liveKey.current === key) setPending(false); }
+  };
+
+  const sourceName = current?.problem.origin.name || (current?.problem.origin.kind === 'evidence' ? 'The current problem' : 'Original material');
+  const closed = current?.status === 'closed';
+  const action = (id: StudyScene['actions'][number]['id']) => current?.actions.find(value => value.id === id);
+  const historyMore = current && current.historyWindow.offset + current.attemptChoices.length < current.history.attemptCount;
+  const hasExploration = hintOpen && !!current?.help?.exploration;
+  const spacious = hintOpen && (hasExploration || current?.help?.kind === 'explanation' || (current?.help?.text.length || 0) > 600);
+  const hintMenu = <details className="study-hint-menu"
+    onKeyDown={event => { if (event.key === 'Escape' && event.currentTarget.open) { event.preventDefault(); event.stopPropagation(); event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus(); } }}
+    onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.open = false; }}>
+    <summary aria-label="More hint options"><MoreHorizontal size={18} aria-hidden="true" /></summary>
+    <div>
+      <button type="button" disabled={pending || disabled} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); requestSmallerHint(); }}>A smaller hint</button>
+      {!hintOpen && <button type="button" disabled={pending || disabled} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); keepHint('later'); }}>Keep</button>}
+      <button type="button" disabled={pending || disabled} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); keepHint('down'); }}>Put aside</button>
+    </div>
+  </details>;
+  // A same-boundary read can clear all old source text while the one real
+  // editor stays put. This retained address is not permission to send or
+  // display anything: App still reopens the owner before a study send.
+  const writingPlace = writingFocus && <div key="writing-place" className="study-writing-dock"><StudyComposerSlot
+    sessionId={sessionId} messageId={messageId} boundaryKey={boundaryKey} label="Discuss this page" focus={writingFocus}
+    onRefresh={refresh} /></div>;
+
+  return <section ref={root} className={`study-desk${current ? ' is-open' : ' is-folded'}${hasExploration ? ' has-exploration' : ''}`}
+    data-paper-reveal={reveal.initial ? 'initial' : 'continuation'}
+    aria-labelledby={headingId} aria-busy={pending} data-study-id={scene.owner.id}>
+    {!current ? <>{!error && shellHeight > 180 ? <div className="study-desk-papers is-waiting"
+      style={{ '--study-shell-height': `${shellHeight}px` } as CSSProperties}>
+      <section className="study-source-paper" aria-hidden="true" /><section className="study-work-paper">
+        <p className="study-paper-wait" role="status"><LoaderCircle size={15} className="study-spin" aria-hidden="true" />Returning to the current step…</p>
+        {writingPlace}
+      </section></div> : <div className="study-folded-paper">
+      <span className="study-folded-mark" aria-hidden="true"><BookOpen size={23} strokeWidth={1.35} /></span>
+      <div><h3 id={headingId}>Continue studying this page</h3>
+        {error ? <p role="status">{error}</p> : pending ? <p role="status">Restoring the problem and the last step…</p> : null}</div>
+      <button type="button" className="study-open" disabled={pending || disabled} onClick={async () => { onReadStart?.(); await refresh(); }}>
+        {pending ? <LoaderCircle size={16} className="study-spin" aria-hidden="true" /> : error ? <RefreshCw size={16} aria-hidden="true" /> : <ArrowUpRight size={17} aria-hidden="true" />}
+        <span>{error ? 'Reopen' : pending ? 'Opening…' : 'Open'}</span>
+      </button>
+    </div>}</> : <>
+      <div className="study-desk-papers">
+        <section className="study-source-paper" aria-labelledby={originalId}
+          data-presence-edge={`study-source:${current.owner.id}`} data-presence-edge-label="Problem sheet">
+          <div className="study-source-reference">
+          {(sourceName !== 'The current problem' || current.problem.origin.resourceId || current.problem.origin.note) && <header className="study-source-heading"><span>{sourceName}{current.problem.origin.page ? ` · p. ${current.problem.origin.page}` : ''}</span>
+            {(current.problem.origin.resourceId || current.problem.origin.note && onOpenSource) && <button type="button" onClick={() => void openOriginal()} disabled={pending || disabled}
+              aria-expanded={current.problem.origin.note ? undefined : sourceOpen}>{current.problem.origin.note ? 'Open original note' : <>{sourceOpen ? 'Close original' : 'View original'} {current.problem.origin.page ? 'page' : 'text'}</>}{sourceOpen ? <X size={16} aria-hidden="true" /> : <ArrowUpRight size={16} aria-hidden="true" />}</button>}</header>}
+          <div className="study-question-label"><h4 id={originalId}>Original problem</h4></div>
+          <div ref={question} className="study-question" onScroll={capturePaperScroll}>{sourceOpen ? <div className="study-original-inline" aria-label="Original study material" aria-busy={sourcePending}>
+            {sourcePending ? <p role="status">Opening original {current.problem.origin.page ? 'page' : 'text'}…</p>
+              : sourceError ? <p role="status">{sourceError}</p>
+                : source?.image ? <img src={source.image.dataUrl} width={source.image.width} height={source.image.height}
+                  alt={`${source.item.name}${source.page ? ` · p. ${source.page}` : ''} — original page`} />
+                  : source ? <RichText text={source.text} /> : null}
+          </div> : <ReadableFocus key={`${current.owner.revision}:problem`} label="The original problem" active={referencedPart?.kind === 'problem'} disabled={pending || disabled}
+            onFocus={() => void referencePart({ kind: 'problem' })}><RichText text={current.problem.text} /></ReadableFocus>}</div>
+          {!sourceOpen && current.problem.origin.interpretation === 'assistant_page_description' && <span className="study-page-caption">Problem interpreted from the original page</span>}
+          </div>
+        </section>
+
+        <StudyPaperDivider key={requestKey} />
+        <section className={`study-work-paper${dropActive ? ' is-bookmark-drop' : ''}`} data-bookmark-target={bookmarkTarget} aria-labelledby={headingId}
+          data-presence-edge={`study-work:${current.owner.id}`} data-presence-edge-label="Study sheet"
+          onDragOver={event => { if (tray && event.dataTransfer.types.includes(SOURCE_BOOKMARK_MIME)) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'copy'; setDropActive(true); } }}
+          onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropActive(false); }}
+          onDrop={event => { const reference = readBookmarkTransfer(event.dataTransfer); setDropActive(false); if (reference && tray) { event.preventDefault(); event.stopPropagation(); void tray.offer(reference, bookmarkTarget); } }}>
+          <header className="study-work-heading"><h3 id={headingId}>{current.heading}</h3>
+            {current.status === 'active' && <button type="button" className="study-park" onClick={() => void park()} disabled={pending || disabled}>
+              <Bookmark size={14} aria-hidden="true" /><span>Put aside for now</span></button>}</header>
+          <div ref={workRow} className={`study-work-row${spacious ? ' is-spacious' : ''}${current.learnerAttempt ? ' has-attempt' : ''}`}>
+            {pencilLink && <svg className={`study-pencil-link${reveal.help ? ' is-new' : ''}`} aria-hidden="true"
+              width="100%" height="100%" viewBox={`0 0 ${pencilLink.width} ${pencilLink.height}`}>
+              <path d={pencilLink.path} pathLength="1" /><circle cx={pencilLink.x} cy={pencilLink.y} r="2.6" />
+            </svg>}
+            <div className="study-my-work">
+              {current.learnerAttempt && <label>My attempt so far</label>}
+              {current.learnerAttempt ? <div ref={manuscript} className="study-manuscript" aria-label="Your saved derivation" onScroll={capturePaperScroll}>
+                {current.learnerLines.map(line => <div className={`study-manuscript-line${line.id === current.learnerAttempt?.id ? ' is-current' : ''}`} key={line.id}>
+                  <ReadableFocus key={`${current.owner.revision}:${line.id}`} label="This line I wrote"
+                    active={referencedPart?.kind === 'attempt' && referencedPart.attemptId === line.id} disabled={pending || disabled}
+                    onFocus={() => void referencePart({ kind: 'attempt', attemptId: line.id })}>
+                  <div ref={line.id === current.learnerAttempt?.id ? writtenLine : undefined}
+                    className={`study-handwritten${line.id === current.learnerAttempt?.id && reveal.attempt ? ' is-new' : ''}`}><RichText text={line.text} /></div>
+                  </ReadableFocus>
+                </div>)}
+              </div>
+                : hintOpen ? <div className="study-starting-point"><RichText text={current.nextMove.text} /></div> : null}
+              {(historyMore || current.historyWindow.offset > 0) && <button type="button" className="study-earlier" disabled={pending || disabled}
+                onClick={() => void refresh({ historyOffset: current.historyWindow.offset > 0 ? 0 : current.historyWindow.offset + current.historyWindow.limit,
+                  historyLimit: current.historyWindow.limit })}>
+                {current.historyWindow.offset > 0 ? 'Return to the last step' : 'Earlier attempts'}<ChevronDown size={12} aria-hidden="true" /></button>}
+            </div>
+            {current.help && hintOpen && <aside ref={marginNote} key={current.help.id} className={`study-margin-note${spacious ? ' is-spacious' : ''}${hasExploration ? ' has-exploration' : ''}${reveal.help ? ' is-new' : ''}`} aria-label="Current help">
+              <ReadableFocus key={`${current.owner.revision}:${current.help.id}`} label="The current hint"
+                active={referencedPart?.kind === 'help' && referencedPart.stepId === current.help.id} disabled={pending || disabled}
+                onFocus={() => void referencePart({ kind: 'help', stepId: current.help!.id })}>
+              {current.help.title && <h4>{current.help.title}</h4>}
+              <RichText text={current.help.text} />
+              </ReadableFocus>
+              {current.help.exploration && <ExplorableStudyView key={current.help.id} spec={current.help.exploration}
+                disabled={pending || disabled || closed} onContinue={continueExploration} />}
+              {foldedHint && <div className="study-hint-expanded-actions">
+                <button type="button" disabled={pending || disabled} onClick={() => keepHint('later')}>Close hint</button>
+                {hintMenu}
+              </div>}
+            </aside>}
+            {foldedHint && !hintOpen && !hintDown && <aside className="study-hint-envelope" aria-label="A hint in the margin">
+              <Bookmark size={18} aria-hidden="true" /><span>{current.help?.title || 'Hint for this line'}</span>
+              <div className="study-hint-choices"><button type="button" disabled={pending || disabled} onClick={() => void openHint()}>Open hint</button>{hintMenu}</div>
+            </aside>}
+          </div>
+
+          {current.bookmark && <div className="study-source-bookmark"><BookOpen size={15} aria-hidden="true" /><div><button type="button" onClick={() => void openOriginal()}>{current.bookmark.title}{current.bookmark.page ? ` · p. ${current.bookmark.page}` : ''}<ArrowUpRight size={12} /></button><blockquote><RichText text={current.bookmark.text} /></blockquote></div><button type="button" className="study-remove-bookmark" aria-label="Remove this bookmark" disabled={pending || disabled || closed} onClick={() => void removeBookmark()}><X size={14} /></button></div>}
+
+          {current.status === 'parked' && current.stopPoint && <div className="study-bookmark-point"><Bookmark size={16} aria-hidden="true" />
+            <p>{current.stopPoint.text}</p></div>}
+          {closed && current.closure ? <p className="study-closed-note">{current.closure.text}</p> : null}
+          {!closed && current.learnerAttempt && hintOpen && <div className="study-next-move"><RichText text={current.nextMove.text} /></div>}
+          {writingPlace}
+          {!closed && <footer className="study-help-choices">
+              {hintDown && <button type="button" className="study-hint" onClick={() => keepHint('later')}>A hint in the margin<Bookmark size={13} /></button>}
+              {action('hint') && (!foldedHint || hintOpen) && <button type="button" className="study-hint" disabled={pending || disabled} onClick={() => void act('hint')}>
+                {current.help ? 'Another hint' : 'Give me a hint'}<ArrowRight size={14} aria-hidden="true" /></button>}
+              <div className="study-other-choices">
+                <details onKeyDown={event => { if (event.key === 'Escape' && event.currentTarget.open) { event.preventDefault(); event.stopPropagation(); event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus(); } }}
+                  onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.open = false; }}>
+                  <summary aria-label="Another way to study together"><MoreHorizontal size={18} aria-hidden="true" /></summary>
+                  <div>{action('example') && <button type="button" disabled={pending || disabled} onClick={event => {
+                    event.currentTarget.closest('details')?.removeAttribute('open'); void act('example'); }}>Explain with another example</button>}
+                    {action('try') && <button type="button" disabled={pending || disabled} onClick={event => {
+                      event.currentTarget.closest('details')?.removeAttribute('open'); void act('try'); }}>Let me try first</button>}</div>
+                </details>
+                {action('explain') && <button type="button" className="study-explain" disabled={pending || disabled} onClick={() => void act('explain')}>Explain it fully</button>}
+              </div>
+            </footer>}
+          {error && <p className="study-inline-error" role="status">{error}</p>}
+        </section>
+      </div>
+    </>}
+  </section>;
+}

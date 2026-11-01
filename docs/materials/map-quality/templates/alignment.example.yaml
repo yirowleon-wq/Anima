@@ -1,0 +1,43 @@
+template_only: true
+alignment_id: __UNSET__
+source_id: null
+source_geometry_hash: null
+source_role: null
+source_crs: null
+source_axis_order: null
+source_unit: null
+provider_conversion:
+  input_system: null
+  output_system: null
+  method_and_version: null
+  authorized_use_locator: null
+  applied_times: null
+canonical_crs: null
+metric_analysis_crs: null
+vertical_datum: null
+image_registration:
+  eligible_for_geometry: null
+  eligibility_reason: null
+  model: null
+  parameter_locator: null
+  fitting_control_points_locator: null
+  independent_check_points_locator: null
+  point_selection_and_uncertainty: null
+  fitting_rmse_m: null
+  independent_rmse_m: null
+  independent_p95_m: null
+  independent_max_m: null
+  residual_vectors_locator: null
+  local_distortion_report: null
+  valid_extent_locator: null
+renderer_transform:
+  origin: null
+  axes: null
+  unit: null
+  transform_locator: null
+frozen_thresholds:
+  id: null
+  reason_and_calibration: null
+  approved_by: null
+  actual_approval_locator: null
+status: NOT_EVALUATED

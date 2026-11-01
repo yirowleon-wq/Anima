@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-chat-rain-literary-complete-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "229156a8a56698f5e0fb73424c3b65dc5fe3adde0fbee3101033ca5df1ce3f2f"
+  },
+  "visibleGeometry": {},
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

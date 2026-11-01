@@ -1,0 +1,5740 @@
+import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { randomUUID, createHash } from 'node:crypto';
+import type { Message } from '../../shared/types';
+import { assistantTextReferenceSchema, type AssistantTextReference } from '../../shared/workspace-context';
+import fs from 'node:fs';
+import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import * as z from 'zod';
+import type {
+  Assertion,
+  AssertionCitation,
+  ClockPort,
+  ContextReceipt,
+  Dependency,
+  EvidenceEvent,
+  HostIdentity,
+  ProcessingSpan,
+  ProcessingStatus,
+  PlanningMaterialProvenance,
+  ScopeData,
+  ScopeHandle,
+  Watermarks,
+  WorkRecord,
+  WorkSourceBinding,
+  WorkSourceRef,
+  AssistantWorkSource,
+  InteractiveProgramSource,
+  MemoryReferenceContext,
+  MaterialNavigationProof,
+  CampusSavedReadingProof,
+  CampusReadingSelector,
+  ReleaseSource,
+} from '../../shared/harness';
+import { HarnessError, assertionSchema, evidenceSchema, workSchema, workSourceBindingSchema, workSourceRefSchema, assistantWorkSourceSchema, interactiveProgramSourceSchema, memoryReferenceSchema, materialNavigationProofSchema } from '../../shared/harness';
+import { canonical, codePointSlice, systemClock } from '../runtime/semantics';
+import { declaredFrameSourceRefs } from '../runtime/source-quote';
+import { evidenceImageRead, readEvidenceImage, providedImageVersions } from '../runtime/evidence-images';
+import { sameSourceOrigins, sourceOriginSpans, type LineageSource, type OriginSpan } from './source-lineage';
+import { planningMaterialProvenanceSchema, type PlanningAttemptBasis } from '../actions/planning-intent-contract';
+import { installSemanticSchema, eraseSemanticChunks } from '../memory/semantic-store';
+import { reflectiveLetterMetadataSchema, type ReflectiveLetterMetadata } from '../../shared/reflective-letter';
+import { curiosityViewSchema, type CuriosityScene } from '../../shared/curiosity-scene';
+import { personalMethodSourcesSchema, type PersonalMethodSources } from '../../shared/personal-method';
+import { companionSceneProjectionSchema, type CompanionSceneProjection } from '../../shared/companion-session';
+import { discussionModuleRefSchema, type DiscussionScene, type DiscussionSnapshotMetadata } from '../../shared/discussion-scene';
+import { campusSensitiveReadSchema, type CampusSensitiveRead } from '../../shared/campus-academic';
+import { noteSourceProofSchema, type NoteSourceProof } from '../../shared/notes-source';
+import { workoutSourceProofSchema, workoutSourceObjectId, type WorkoutSourceProof } from '../../shared/workout-source';
+import { historicalWorkSourceSchema, type HistoricalWorkSource } from '../../shared/method-work-help';
+import { spatialBindingSchema, spatialSourceProofSchema, type SpatialBinding, type SpatialSourceProof } from '../../shared/spatial-source';
+
+type Row = Record<string, unknown>;
+// Privacy cleanup may retain only the address-only owner-choice receipt. In
+// particular, arbitrary operation results and user-authored method text do not
+// qualify just because their kind happens to have this name.
+const personalMethodChoiceMetadataSchema = z.object({
+  version: z.literal(1), ownerId: z.string(), workspaceId: z.string(),
+  methodId: z.string().regex(/^personal:[0-9a-f-]{36}$/), methodRevision: z.number().int().positive(),
+  operation: z.enum(['save', 'revise', 'disable']), source: workSourceRefSchema,
+  sourceQuoteSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  changedFields: z.array(z.enum(['name', 'description', 'instructions', 'requirements', 'usage', 'conditions',
+    'conditions.when', 'conditions.adaptToCurrent', 'conditions.avoidWhen', 'status'])).max(12),
+  reviewDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  legacyOperationId: z.string().regex(/^personal-method:[a-f0-9]{64}$/).optional(),
+  recordedAt: z.string().datetime().optional(),
+}).strict().refine(value => !!value.reviewDigest !== !!value.legacyOperationId);
+type SpatialBindingVersionMetadata = { revision: number; type: string; placeId?: string; evidenceIds: string[];
+  spatialBinding?: SpatialBinding; range?: 'unknown' };
+export type AssistantWorkProofState = { checked: Map<string, boolean | 'checking'>; permits?: (ref: WorkSourceRef) => boolean; sessionId?: string; localDisplay?: boolean };
+export interface AssistantHistoricalWorkCursor { createdAt: string; messageId: string; sceneIndex: number }
+type AssistantHistoricalWorkOptions = { messageId?: string; sceneId?: string; sceneRevision?: number; sessionId?: string; query?: string; limit?: number;
+  matterId?: string; ownerId?: string; ownerRevision?: number; matterRevision?: number; order?: 'oldest' | 'newest'; cursor?: AssistantHistoricalWorkCursor;
+  permits?: (ref: WorkSourceRef) => boolean };
+export interface PersonalMethodApplication {
+  methodId: string; revision: number; source: WorkSourceRef; matterId?: string; sources: PersonalMethodSources;
+}
+export interface PrivacyFence {
+  id: string;
+  epoch: number;
+  objectIds: string[];
+  sourceIds: string[];
+  createdAt: string;
+  kind: 'delete' | 'revoke';
+  scope?: string;
+  spans?: { eventId: string; contentVersion: number; start: number; end: number }[];
+  /** Host-only conversation deletion exception; no source text is retained. */
+  preservedLocalAgenda?: { agendaId: string; agendaRevision: number; agendaSha256: string; actionId: string; actionRevision: number; actionDigest: string }[];
+  deletedConversationIds?: string[];
+}
+export type FaultInjector = (point: string) => void;
+export type SourceRestrictionSnapshot = ReadonlyMap<string, { metadata: string; wholeSource: boolean }>;
+export interface ReviewedSourceRestriction {
+  eventId: string; predicate: string; operation: string; replacementEventId: string | null;
+  ranges: { contentVersion: number; start: number; end: number }[];
+}
+export type MemoryContextScope = Pick<ScopeData, 'principalId' | 'workspaceId' | 'subjectId' | 'worldId' | 'audience' | 'retention' | 'infer'
+  | 'sources' | 'currentEventIds' | 'purposes' | 'grants'>;
+/** Host-only same-session sequence addresses, bound to the progress row's
+ * original source version. They contain neither source text nor permission. */
+export interface MemoryContextDirectoryPosition { before: number; later: number }
+const parse = <T>(row: Row | undefined): T | undefined => (row ? JSON.parse(String(row.payload)) : undefined);
+const sourceContextProjection = (raw: unknown) => raw === null || raw === undefined ? {}
+  : { sourceContext: evidenceSchema.shape.sourceContext.parse(JSON.parse(String(raw))) };
+/** Done keeps its existing contract. Interrupted replies expose only their
+ * saved public prefix, with the original host receipt still required. */
+export const assistantReplyStatusSql = (alias = 'm') => `((COALESCE(json_extract(${alias}.payload,'$.hostStatus.code'),'')!='source_changed'
+  OR length(${alias}.content)>0) AND (json_extract(${alias}.payload,'$.status')='done' OR (
+  json_extract(${alias}.payload,'$.status') IN ('cancelled','error') AND length(trim(${alias}.content))>0
+  AND json_type(${alias}.payload,'$.contextReceipt')='object'
+  AND json_type(${alias}.payload,'$.contextReceipt.id')='text'
+  AND json_type(${alias}.payload,'$.contextReceipt.privacyEpoch')='integer'
+  AND json_type(${alias}.payload,'$.contextReceipt.policyRevision')='integer'
+  AND json_type(${alias}.payload,'$.contextReceipt.providedSourceIds')='array')))`;
+const assistantReplyState = (status: unknown): Pick<MemoryReferenceContext, 'replyState'> => status === 'cancelled' || status === 'error' ? {
+  replyState: { status, completion: 'partial' as const, exposure: 'unknown' as const,
+    meaning: "This response was interrupted here. Only its saved body is supplied; it does not establish a complete response, user reading or understanding." },
+} : {};
+const sourceImageProjection = (raw: unknown, id: string, version: number) => {
+  if (raw === null || raw === undefined) return {};
+  const parsed = evidenceSchema.shape.imageSource.safeParse(JSON.parse(String(raw)));
+  const image = parsed.success ? evidenceImageRead({ id, contentVersion: version, imageSource: parsed.data,
+    speaker: 'user', kind: 'user_message', status: 'active' }) : undefined;
+  return image ? { image } : {};
+};
+const placeholders = (values: readonly unknown[]) => values.map(() => '?').join(',') || 'NULL';
+const queryGrams = (query: string) => {
+  return [...new Set(query.normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu) || [])];
+};
+const columns = `owner TEXT NOT NULL, workspace TEXT NOT NULL, subject TEXT NOT NULL, world TEXT NOT NULL,
+ source TEXT NOT NULL, purpose TEXT NOT NULL, audience TEXT NOT NULL, sensitivity TEXT NOT NULL,
+ retain TEXT NOT NULL, infer INTEGER NOT NULL, expires_at TEXT`;
+
+/** Owns short synchronous SQLite transactions. No provider/model work is permitted inside write(). */
+export class KernelRepository {
+  private readonly methodApplications = new AsyncLocalStorage<{ scopeId: string; items: readonly PersonalMethodApplication[] }>();
+  private readonly spatialApplications = new AsyncLocalStorage<{ scopeId: string; items: readonly SpatialSourceProof[] }>();
+  private readonly workoutApplications = new AsyncLocalStorage<{ scopeId: string; items: readonly WorkoutSourceProof[] }>();
+  private readonly withdrawnWorkouts = new Set<string>();
+  private readonly memoryReferenceChecks = new Set<string>();
+  verifyCompanionSnapshotMetadata?: (handle: ScopeHandle,
+    header: Pick<CompanionSceneProjection, 'id' | 'revision' | 'matterId' | 'matterRevision' | 'snapshotProof'>,
+    permits?: (ref: WorkSourceRef) => boolean) => boolean;
+  projectAssistantCoWorkScene?: (handle: ScopeHandle, scene: DiscussionScene, permits?: (ref: WorkSourceRef) => boolean) => DiscussionScene;
+  verifyDiscussionSnapshotMetadata?: (handle: ScopeHandle, metadata: DiscussionSnapshotMetadata, permits?: (ref: WorkSourceRef) => boolean) => boolean;
+  verifyCampusSensitiveReads?: (handle: ScopeHandle, reads: unknown, localDisplay?: boolean) => boolean;
+  verifyReleaseMessage?: (handle: ScopeHandle, headers: unknown, receipt: unknown, legacy: boolean, proofs: AssistantWorkProofState) => boolean;
+  verifyReleaseSources?: (handle: ScopeHandle, sources: unknown, currentObjects: boolean, proofs: AssistantWorkProofState) => boolean;
+  verifyStudyWorkSources?: (handle: ScopeHandle, value: { id: string; sourceBinding: WorkSourceBinding;
+    sourceMaterial?: import('../../shared/method-work-help').MethodHelpMaterialIdentity;
+    noteSources?: NoteSourceProof[]; problemIdentitySha256?: string }) => boolean;
+  currentStudyWorkSources?: (handle: ScopeHandle, value: { id: string; revision: number }) => {
+    sourceBinding: WorkSourceBinding; sourceMaterial?: import('../../shared/method-work-help').MethodHelpMaterialIdentity;
+    noteSources?: NoteSourceProof[]; problemIdentitySha256?: string;
+  } | undefined;
+
+  withPersonalMethodApplications<T>(handle: ScopeHandle, items: readonly PersonalMethodApplication[], operation: () => T): T {
+    this.scope(handle);
+    return this.methodApplications.run({ scopeId: handle.id, items: structuredClone(items) }, operation);
+  }
+  withSpatialSources<T>(handle: ScopeHandle, sources: readonly SpatialSourceProof[], operation: () => T): T {
+    if (!this.spatialSourcesReadable(handle, sources))
+      throw new HarnessError('spatial_source_changed', "The adopted place basis changed.");
+    return this.spatialApplications.run({ scopeId: handle.id, items: structuredClone(sources) }, operation);
+  }
+  withWorkoutSources<T>(handle: ScopeHandle, sources: readonly WorkoutSourceProof[], operation: () => T): T {
+    if (!this.workoutSourcesReadable(handle, sources))
+      throw new HarnessError('workout_source_changed', "The activity record used here was cancelled.");
+    return this.workoutApplications.run({ scopeId: handle.id, items: structuredClone(sources) }, operation);
+  }
+  readonly identity: HostIdentity;
+  readonly clock: ClockPort;
+  readonly databasePath: string;
+  private validateScope?: (scope: ScopeHandle) => ScopeData;
+  private verifyPlanningAttemptBasis?: (handle: ScopeHandle, intentId: string, basis: PlanningAttemptBasis[]) => void;
+  private transactionDepth = 0;
+  private afterCommitCallbacks: (() => void)[] = [];
+  private privacyCleanupListeners = new Set<() => void>();
+  fault?: FaultInjector;
+  readonly transitions: { at: string; objectId: string; from?: string; to: string; revision?: number }[] = [];
+  readonly access: { principalId: string; scopeId: string; purposes: readonly string[]; source: string; objectId: string; kind: string }[] = [];
+  readonly conflicts: { objectId: string; expected: number; actual: number }[] = [];
+  constructor(
+    readonly db: DatabaseSync,
+    file: string,
+    clock: ClockPort = systemClock,
+    identity?: HostIdentity,
+  ) {
+    this.databasePath = file;
+    this.clock = clock;
+    this.db.function('note_codepoint_length', { deterministic: true }, value =>
+      typeof value === 'string' ? Array.from(value).length : null);
+    this.migrate();
+    this.migrateCalendarVersions();
+    this.migrateSourceRestrictionSpans();
+    this.migrateAssertionCitations();
+    this.migrateMemoryContextProgress();
+    this.migrateCitationRestrictionReceipts();
+    this.migratePlanningIntentRelations();
+    this.migratePlanningIntentSources();
+    this.migrateInvestigationFrontiers();
+    this.migrateAssertionHistory();
+    this.migrateSemanticIndex();
+    this.db.exec(
+      "INSERT INTO h_evidence_fts(h_evidence_fts,rank) VALUES('secure-delete',1); INSERT INTO h_assertion_fts(h_assertion_fts,rank) VALUES('secure-delete',1);",
+    );
+    this.identity = this.getMeta<HostIdentity>('identity') ||
+      identity || { principalId: randomUUID(), workspaceId: randomUUID(), deviceId: randomUUID() };
+    if (!this.getMeta('identity')) this.write(() => this.setMeta('identity', this.identity));
+    this.applyRestorationFences();
+    this.removeDeletedSourceReplays();
+    this.onPrivacyCleanup(() => this.cleanupMemoryContextRequests());
+    this.onPrivacyCleanup(() => this.pruneSemanticIndex());
+    this.cleanupMemoryContextRequests();
+    this.pruneSemanticIndex();
+  }
+  bindPolicy(validate: (scope: ScopeHandle) => ScopeData) {
+    this.validateScope = validate;
+  }
+  bindPlanningAttemptVerifier(verify: (handle: ScopeHandle, intentId: string, basis: PlanningAttemptBasis[]) => void) {
+    this.verifyPlanningAttemptBasis = verify;
+  }
+  scope(scope: ScopeHandle): ScopeData {
+    if (!this.validateScope) throw new HarnessError('policy_unavailable', "Policy is not initialized.");
+    return this.validateScope(scope);
+  }
+  private migrate() {
+    this.db.exec('PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;');
+    const version = Number(this.db.prepare('PRAGMA user_version').get()?.user_version || 0);
+    if (version > 14) throw new HarnessError('newer_schema', "This material uses a newer version. Open it with the corresponding version.");
+    if (version >= 4) return;
+    if (version === 3) {
+      this.migrateRoots();
+      return;
+    }
+    if (version === 2) {
+      this.migrateDomainVersions();
+      return;
+    }
+    if (version === 1) {
+      this.migratePorts();
+      return;
+    }
+    // Backup is local, never exported. Fresh/empty test stores need no redundant backup.
+    const count = Number(
+      this.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name='messages'").get()
+        ?.n || 0,
+    );
+    if (
+      this.databasePath !== ':memory:' &&
+      count &&
+      Number(this.db.prepare('SELECT count(*) AS n FROM messages').get()?.n || 0)
+    ) {
+      const backup = this.databasePath + '.pre-harness-v1.sqlite';
+      if (!fs.existsSync(backup)) this.db.prepare('VACUUM INTO ?').run(backup);
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec(`
+        CREATE TABLE h_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE h_migrations(id TEXT PRIMARY KEY,version INTEGER NOT NULL,applied_at TEXT NOT NULL,details TEXT NOT NULL);
+        CREATE TABLE h_fences(id TEXT PRIMARY KEY,epoch INTEGER NOT NULL,payload TEXT NOT NULL);
+        CREATE TABLE h_evidence(id TEXT PRIMARY KEY,${columns},version INTEGER NOT NULL,seq INTEGER UNIQUE NOT NULL,
+          received_at TEXT NOT NULL,status TEXT NOT NULL,content TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX h_evidence_scope ON h_evidence(owner,workspace,subject,world,source,status,seq);
+        CREATE INDEX h_evidence_time ON h_evidence(owner,workspace,received_at);
+        CREATE TABLE h_spans(id TEXT PRIMARY KEY,event_id TEXT NOT NULL REFERENCES h_evidence(id) ON DELETE CASCADE,
+          content_version INTEGER NOT NULL,start_cp INTEGER NOT NULL,end_cp INTEGER NOT NULL,status TEXT NOT NULL,indexed INTEGER NOT NULL DEFAULT 0,
+          UNIQUE(event_id,content_version,start_cp,end_cp));
+        CREATE TABLE h_assertions(id TEXT PRIMARY KEY,${columns},revision INTEGER NOT NULL,predicate TEXT NOT NULL,
+          kind TEXT NOT NULL,status TEXT NOT NULL,strength TEXT NOT NULL,valid_from TEXT,valid_to TEXT,text TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX h_assertions_scope ON h_assertions(owner,workspace,subject,world,source,status,predicate);
+        CREATE INDEX h_assertions_time ON h_assertions(owner,workspace,valid_from,valid_to,status);
+        CREATE TABLE h_assertion_versions(id TEXT NOT NULL REFERENCES h_assertions(id) ON DELETE CASCADE,revision INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(id,revision));
+        CREATE TABLE h_assertion_evidence(assertion_id TEXT NOT NULL REFERENCES h_assertions(id) ON DELETE CASCADE,event_id TEXT NOT NULL REFERENCES h_evidence(id) ON DELETE CASCADE,
+          start_cp INTEGER,end_cp INTEGER,PRIMARY KEY(assertion_id,event_id));
+        CREATE INDEX h_evidence_assertion_reverse ON h_assertion_evidence(event_id,assertion_id);
+        CREATE TABLE h_proposals(id TEXT PRIMARY KEY,event_id TEXT,epoch INTEGER NOT NULL,status TEXT NOT NULL,reason TEXT,payload TEXT NOT NULL);
+        CREATE TABLE h_operations(id TEXT PRIMARY KEY,kind TEXT NOT NULL,result TEXT NOT NULL);
+        CREATE TABLE h_outbox(id TEXT PRIMARY KEY,kind TEXT NOT NULL,object_id TEXT NOT NULL,epoch INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL);
+        CREATE INDEX h_outbox_pending ON h_outbox(status,created_at);
+        CREATE TABLE h_dependencies(consumer_id TEXT NOT NULL,producer_id TEXT NOT NULL,producer_revision INTEGER NOT NULL,sensitivity TEXT NOT NULL,invalidation TEXT NOT NULL,
+          PRIMARY KEY(consumer_id,producer_id));
+        CREATE INDEX h_dependencies_reverse ON h_dependencies(producer_id,consumer_id);
+        CREATE TABLE h_work(id TEXT PRIMARY KEY,${columns},kind TEXT NOT NULL,revision INTEGER NOT NULL,status TEXT NOT NULL,title TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX h_work_scope ON h_work(owner,workspace,subject,world,kind,status);
+        CREATE TABLE h_worlds(id TEXT PRIMARY KEY,owner TEXT NOT NULL,workspace TEXT NOT NULL,subject TEXT NOT NULL,base_revision INTEGER NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE TABLE h_domain(id TEXT NOT NULL,source TEXT NOT NULL,domain TEXT NOT NULL,institution TEXT NOT NULL,term TEXT NOT NULL,${columns.replace('source TEXT NOT NULL,', '')},
+          revision INTEGER NOT NULL,status TEXT NOT NULL,evidence_id TEXT NOT NULL REFERENCES h_evidence(id),fetched_at TEXT NOT NULL,payload TEXT NOT NULL,
+          PRIMARY KEY(id,source,domain,institution,term));
+        CREATE INDEX h_domain_scope ON h_domain(owner,workspace,subject,world,domain,institution,term,status);
+        CREATE TABLE h_sync(source TEXT NOT NULL,domain TEXT NOT NULL,institution TEXT NOT NULL,term TEXT NOT NULL,scope_key TEXT NOT NULL,status TEXT NOT NULL,cursor TEXT,payload TEXT NOT NULL,
+          PRIMARY KEY(source,domain,institution,term,scope_key));
+        CREATE TABLE h_actions(id TEXT PRIMARY KEY,owner TEXT NOT NULL,workspace TEXT NOT NULL,subject TEXT NOT NULL,world TEXT NOT NULL,
+          revision INTEGER NOT NULL,status TEXT NOT NULL,goal_id TEXT,source TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX h_actions_scope ON h_actions(owner,workspace,subject,world,status);
+        CREATE TABLE h_approvals(id TEXT PRIMARY KEY,action_id TEXT NOT NULL REFERENCES h_actions(id) ON DELETE CASCADE,payload TEXT NOT NULL);
+        CREATE TABLE h_attempts(id TEXT PRIMARY KEY,action_id TEXT NOT NULL REFERENCES h_actions(id) ON DELETE CASCADE,idempotency_key TEXT NOT NULL,status TEXT NOT NULL,epoch INTEGER NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX h_attempts_action ON h_attempts(action_id,status);
+        CREATE TABLE h_receipts(id TEXT PRIMARY KEY,action_id TEXT NOT NULL REFERENCES h_actions(id) ON DELETE CASCADE,attempt_id TEXT NOT NULL REFERENCES h_attempts(id),payload TEXT NOT NULL);
+        CREATE TABLE h_jobs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,object_id TEXT NOT NULL,goal_id TEXT,source TEXT NOT NULL,
+          epoch INTEGER NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL,lease_until TEXT,fence INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,
+          dedup_key TEXT UNIQUE NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX h_jobs_due ON h_jobs(status,due_at,lease_until);
+        CREATE TABLE h_deliveries(id TEXT PRIMARY KEY,job_id TEXT NOT NULL REFERENCES h_jobs(id) ON DELETE CASCADE,status TEXT NOT NULL,dedup_key TEXT UNIQUE NOT NULL,payload TEXT NOT NULL);
+        CREATE TABLE h_runs(id TEXT PRIMARY KEY,owner TEXT NOT NULL,workspace TEXT NOT NULL,epoch INTEGER NOT NULL,payload TEXT NOT NULL);
+        CREATE TABLE h_aliases(entity_id TEXT NOT NULL,alias TEXT NOT NULL,owner TEXT NOT NULL,workspace TEXT NOT NULL,institution TEXT NOT NULL,role TEXT NOT NULL,source TEXT NOT NULL,
+          PRIMARY KEY(entity_id,alias,institution));
+        CREATE INDEX h_alias_lookup ON h_aliases(owner,workspace,institution,alias);
+        CREATE VIRTUAL TABLE h_evidence_fts USING fts5(id UNINDEXED,text,tokenize='unicode61 remove_diacritics 2');
+        CREATE VIRTUAL TABLE h_assertion_fts USING fts5(id UNINDEXED,text,tokenize='unicode61 remove_diacritics 2');
+        CREATE TABLE h_grams(kind TEXT NOT NULL,object_id TEXT NOT NULL,gram TEXT NOT NULL,PRIMARY KEY(kind,object_id,gram));
+        CREATE INDEX h_grams_lookup ON h_grams(kind,gram,object_id);
+        INSERT INTO h_meta VALUES('privacy_epoch','1'),('policy_revision','1'),('received_seq','0'),('sequence_base','0'),('domain_revision','0');
+        PRAGMA user_version=1;
+      `);
+      this.db
+        .prepare('INSERT INTO h_migrations VALUES(?,?,?,?)')
+        .run(
+          'harness-foundation-v1',
+          1,
+          this.clock.now(),
+          JSON.stringify({ legacyPreserved: true, privacyBarrierRequiredForRollback: true }),
+        );
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    this.migratePorts();
+  }
+  private migratePorts() {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec(`
+        CREATE TABLE h_observations(id TEXT PRIMARY KEY,${columns},kind TEXT NOT NULL,version INTEGER NOT NULL,status TEXT NOT NULL,evidence_id TEXT NOT NULL REFERENCES h_evidence(id),payload TEXT NOT NULL);
+        CREATE INDEX h_observations_scope ON h_observations(owner,workspace,subject,world,kind,status,source);
+        CREATE TABLE h_observation_versions(id TEXT NOT NULL REFERENCES h_observations(id) ON DELETE CASCADE,version INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(id,version));
+        CREATE TABLE h_sync_operations(device_id TEXT NOT NULL,operation_id TEXT NOT NULL,object_id TEXT NOT NULL,base_revision INTEGER NOT NULL,epoch INTEGER NOT NULL,status TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(device_id,operation_id));
+        CREATE TABLE h_watches(id TEXT PRIMARY KEY,owner TEXT NOT NULL,workspace TEXT NOT NULL,goal_id TEXT NOT NULL,status TEXT NOT NULL,epoch INTEGER NOT NULL,novelty_key TEXT,payload TEXT NOT NULL);
+        CREATE INDEX h_watches_goal ON h_watches(goal_id,status);
+        CREATE TABLE h_source_restrictions(event_id TEXT NOT NULL,predicate TEXT NOT NULL,operation TEXT NOT NULL,replacement_event_id TEXT,PRIMARY KEY(event_id,predicate));
+        PRAGMA user_version=2;
+      `);
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run(
+        'extension-ports-v2',
+        2,
+        this.clock.now(),
+        JSON.stringify({
+          observations: 'versioned',
+          sync: 'proposals_only',
+          sourceRestrictions: 'no_plaintext',
+        }),
+      );
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    this.migrateDomainVersions();
+  }
+  private migrateDomainVersions() {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db
+        .exec(`CREATE TABLE h_domain_versions(id TEXT NOT NULL,source TEXT NOT NULL,domain TEXT NOT NULL,institution TEXT NOT NULL,term TEXT NOT NULL,revision INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(id,source,domain,institution,term,revision));
+        INSERT INTO h_domain_versions SELECT id,source,domain,institution,term,revision,payload FROM h_domain;
+        PRAGMA user_version=3;`);
+      this.db
+        .prepare('INSERT INTO h_migrations VALUES(?,?,?,?)')
+        .run(
+          'domain-versions-v3',
+          3,
+          this.clock.now(),
+          JSON.stringify({ purpose: 'immutable bound scenario baselines' }),
+        );
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    this.migrateRoots();
+  }
+  private migrateRoots() {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db
+        .exec(`CREATE TABLE h_evidence_roots(event_id TEXT NOT NULL REFERENCES h_evidence(id) ON DELETE CASCADE,root_id TEXT NOT NULL,PRIMARY KEY(event_id,root_id));
+        CREATE INDEX h_evidence_root_reverse ON h_evidence_roots(root_id,event_id);
+        INSERT INTO h_evidence_roots SELECT e.id,root.value FROM h_evidence e,json_each(e.payload,'$.roots') root;
+        PRAGMA user_version=4;`);
+      this.db
+        .prepare('INSERT INTO h_migrations VALUES(?,?,?,?)')
+        .run(
+          'provenance-roots-v4',
+          4,
+          this.clock.now(),
+          JSON.stringify({ purpose: 'reverse source-root deletion and derivation traversal' }),
+        );
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  private migrateCalendarVersions() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 5) return;
+    if (this.databasePath !== ':memory:' && Number(this.db.prepare('SELECT count(*) AS n FROM messages').get()?.n || 0)) {
+      const backup = this.databasePath + '.pre-harness-v5.sqlite';
+      if (!fs.existsSync(backup)) this.db.prepare('VACUUM INTO ?').run(backup);
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec('CREATE TABLE h_calendar_versions(id TEXT PRIMARY KEY,agenda_id TEXT NOT NULL,revision INTEGER NOT NULL,UNIQUE(agenda_id,revision)); PRAGMA user_version=5;');
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('calendar-provenance-v5', 5, this.clock.now(), JSON.stringify({ purpose: 'versioned local calendar provenance and safe compensation', rollback: 'pre-harness-v5 backup plus latest privacy fences' }));
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  private migrateSourceRestrictionSpans() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 6) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      // Locators contain no copied source text. Keep the existing four-column
+      // restriction table compatible with source revocation and sync writers.
+      this.db.exec(`CREATE TABLE h_source_restriction_spans(
+        event_id TEXT NOT NULL,predicate TEXT NOT NULL,content_version INTEGER NOT NULL,
+        start_cp INTEGER NOT NULL,end_cp INTEGER NOT NULL,effective_from TEXT,
+        PRIMARY KEY(event_id,predicate,content_version,start_cp,end_cp),
+        FOREIGN KEY(event_id,predicate) REFERENCES h_source_restrictions(event_id,predicate) ON DELETE CASCADE);
+        CREATE TABLE h_memory_recovery(event_id TEXT PRIMARY KEY REFERENCES h_evidence(id) ON DELETE CASCADE,
+          last_attempt_at TEXT NOT NULL,due_at TEXT NOT NULL,transient_failures INTEGER NOT NULL,outcome TEXT NOT NULL);
+        PRAGMA user_version=6;`);
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('source-restriction-spans-v6', 6, this.clock.now(), JSON.stringify({ purpose: 'preserve exact corrected source ranges without suppressing independent facts', legacy: 'unknown ranges remain explicit' }));
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  private migrateAssertionCitations() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 7) return;
+    this.write(() => {
+      this.db.exec(`CREATE TABLE h_assertion_citations(
+        citation_key TEXT PRIMARY KEY,assertion_id TEXT NOT NULL,assertion_revision INTEGER NOT NULL,
+        event_id TEXT NOT NULL REFERENCES h_evidence(id) ON DELETE CASCADE,content_version INTEGER,
+        start_cp INTEGER,end_cp INTEGER,role TEXT NOT NULL,
+        FOREIGN KEY(assertion_id,assertion_revision) REFERENCES h_assertion_versions(id,revision) ON DELETE CASCADE);
+        CREATE INDEX h_citation_source ON h_assertion_citations(event_id,assertion_id,assertion_revision);
+        CREATE INDEX h_citation_version ON h_assertion_citations(assertion_id,assertion_revision);`);
+      for (const row of this.db.prepare('SELECT v.id,v.revision,v.payload,a.revision AS current_revision FROM h_assertion_versions v JOIN h_assertions a ON a.id=v.id').all()) {
+        const value = JSON.parse(String(row.payload)) as Assertion;
+        for (const [index, eventId] of value.evidenceIds.entries()) {
+          const event = this.db.prepare('SELECT version FROM h_evidence WHERE id=?').get(eventId);
+          if (!event) continue;
+          const locator = row.revision === row.current_revision
+            ? this.db.prepare('SELECT start_cp,end_cp FROM h_assertion_evidence WHERE assertion_id=? AND event_id=?').get(value.id, eventId) : undefined;
+          this.storeCitation(value.id, Number(row.revision), { eventId, role: index ? 'support' : 'primary',
+            ...(locator?.start_cp !== null && locator?.start_cp !== undefined && locator.end_cp !== null
+              ? { contentVersion: Number(event.version), start: Number(locator.start_cp), end: Number(locator.end_cp) } : {}) });
+        }
+      }
+      this.db.exec('PRAGMA user_version=7;');
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('assertion-citations-v7', 7, this.clock.now(), JSON.stringify({ purpose: 'versioned exact multi-source support without copied text', legacyHistoricalRanges: 'unknown' }));
+    });
+  }
+  private migrateMemoryContextProgress() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 8) {
+      // The in-flight v8 unit may have been opened before scope binding landed.
+      if (!(this.db.prepare('PRAGMA table_info(h_memory_context)').all() as { name: string }[]).some(column => column.name === 'scope_binding'))
+        this.db.exec("ALTER TABLE h_memory_context ADD COLUMN scope_binding TEXT NOT NULL DEFAULT '{}'");
+      if (!(this.db.prepare('PRAGMA table_info(h_memory_context)').all() as { name: string }[]).some(column => column.name === 'directory_position'))
+        this.db.exec("ALTER TABLE h_memory_context ADD COLUMN directory_position TEXT");
+      return;
+    }
+    this.write(() => {
+      this.db.exec(`CREATE TABLE h_memory_context(
+        span_id TEXT PRIMARY KEY REFERENCES h_spans(id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL REFERENCES h_evidence(id) ON DELETE CASCADE,
+        source_version INTEGER NOT NULL,method_version TEXT NOT NULL,
+        attempt_signature TEXT NOT NULL,source_signature TEXT NOT NULL,context_watermark INTEGER NOT NULL,
+        request_signature TEXT NOT NULL,requests TEXT NOT NULL,request_results TEXT NOT NULL,updated_at TEXT NOT NULL,
+        scope_binding TEXT NOT NULL,directory_position TEXT);
+        CREATE INDEX h_memory_context_event ON h_memory_context(event_id);
+        PRAGMA user_version=8;`);
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('memory-context-progress-v8', 8, this.clock.now(),
+        JSON.stringify({ purpose: 'bounded versioned context addresses and one attempt per legal context generation', copiedSourceText: false }));
+    });
+  }
+  private migrateCitationRestrictionReceipts() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 9) return;
+    this.write(() => {
+      this.db.exec(`CREATE TABLE h_citation_restriction_receipts(
+        citation_key TEXT PRIMARY KEY REFERENCES h_assertion_citations(citation_key) ON DELETE CASCADE,
+        restriction_snapshot TEXT NOT NULL);
+        PRAGMA user_version=9;`);
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('citation-restriction-receipts-v9', 9, this.clock.now(),
+        JSON.stringify({ purpose: 'reviewed source use bound to an exact assertion revision and citation', legacyReceipts: 'not_backfilled' }));
+    });
+  }
+  private migratePlanningIntentRelations() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 10) return;
+    this.write(() => {
+      this.db.exec(`CREATE TABLE h_planning_intent_attempts(
+        plan_id TEXT PRIMARY KEY,intent_id TEXT NOT NULL REFERENCES h_work(id) ON DELETE CASCADE,
+        spec_digest TEXT NOT NULL,manifest TEXT NOT NULL,created_at TEXT NOT NULL);
+        CREATE INDEX h_planning_intent_owner ON h_planning_intent_attempts(intent_id);
+        CREATE TABLE h_planning_intent_action_links(
+          plan_id TEXT NOT NULL REFERENCES h_planning_intent_attempts(plan_id) ON DELETE CASCADE,
+          block_id TEXT NOT NULL,action_id TEXT NOT NULL,action_revision INTEGER NOT NULL,action_digest TEXT NOT NULL,
+          PRIMARY KEY(plan_id,block_id,action_id,action_revision));
+        CREATE INDEX h_planning_intent_action ON h_planning_intent_action_links(action_id);
+        PRAGMA user_version=10;`);
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('planning-intent-relations-v10', 10, this.clock.now(),
+        JSON.stringify({ owner: 'h_work', manifest: 'host_only_nonexecuting', successAuthority: 'existing_action_receipts', legacyBackfill: false }));
+    });
+  }
+  private migratePlanningIntentSources() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 11) return;
+    this.write(() => {
+      // A current parent cannot attest to the sources of an older attempt.
+      // Keep its opaque existence so recovery cannot interpret it as unwritten.
+      this.db.exec(`ALTER TABLE h_planning_intent_attempts ADD COLUMN source_binding TEXT;
+        ALTER TABLE h_planning_intent_attempts ADD COLUMN redacted INTEGER NOT NULL DEFAULT 0;
+        UPDATE h_planning_intent_attempts SET manifest='{}',redacted=1;
+        PRAGMA user_version=11;`);
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('planning-intent-sources-v11', 11, this.clock.now(),
+        JSON.stringify({ ownAttemptSources: true, legacySources: 'not_backfilled', unavailableAttempts: 'opaque_unknown' }));
+    });
+  }
+  private migrateInvestigationFrontiers() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 12) return;
+    this.write(() => {
+      this.db.exec(`CREATE TABLE h_investigation_frontiers(
+        id TEXT PRIMARY KEY,opportunity_id TEXT NOT NULL REFERENCES h_work(id) ON DELETE CASCADE,
+        owner TEXT NOT NULL,workspace TEXT NOT NULL,revision INTEGER NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX h_investigation_frontier_owner ON h_investigation_frontiers(owner,workspace,opportunity_id);
+        PRAGMA user_version=12;`);
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('investigation-frontiers-v12', 12, this.clock.now(),
+        JSON.stringify({ owner: 'help_opportunity', stored: 'versioned_addresses_and_delivery_ack', copiedSourceText: false, restoredAuthority: false }));
+    });
+  }
+  private migrateAssertionHistory() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 13) return;
+    this.write(() => {
+      this.db.exec(`CREATE TABLE h_assertion_revision_log(
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        assertion_id TEXT NOT NULL REFERENCES h_assertions(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,committed_at TEXT NOT NULL,previous_revision INTEGER,
+        operation TEXT NOT NULL,cause_event_id TEXT,cause_version INTEGER,cause_start INTEGER,cause_end INTEGER,related_assertion_id TEXT,
+        UNIQUE(assertion_id,revision));
+        CREATE INDEX h_assertion_revision_time ON h_assertion_revision_log(assertion_id,committed_at,sequence);
+        PRAGMA user_version=13;`);
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('assertion-history-v13', 13, this.clock.now(),
+        JSON.stringify({ hostCommitTimes: true, copiedSourceText: false, legacyCommitTimes: 'unknown_not_backfilled' }));
+    });
+  }
+  private migrateSemanticIndex() {
+    if (Number(this.db.prepare('PRAGMA user_version').get()?.user_version) >= 14) return;
+    this.write(() => {
+      installSemanticSchema(this.db);
+      this.db.exec('PRAGMA user_version=14;');
+      this.db.prepare('INSERT INTO h_migrations VALUES(?,?,?,?)').run('local-semantic-index-v14', 14, this.clock.now(),
+        JSON.stringify({ owner: 'evidence', stored: 'source_addresses_hashes_and_private_derived_vectors', copiedSourceText: false }));
+    });
+  }
+  /** Rebuildable vectors obey current original ranges even in restored stores
+   * whose older deletion marker already committed. No scope is widened here. */
+  pruneSemanticIndex() {
+    this.write(() => {
+      let removed = false;
+      for (const row of this.db.prepare('SELECT DISTINCT event_id FROM h_semantic_chunks').all()) {
+        const id = String(row.event_id), event = parse<EvidenceEvent>(this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(id));
+        const allowed = event && event.label.infer && event.label.retention === 'purpose_scoped'
+          && event.speaker === 'user' && event.authority === 'user_statement' ? this.availableInferenceRanges(event) : [];
+        for (const chunk of this.db.prepare('SELECT content_version,start_cp,end_cp,text_sha256 FROM h_semantic_chunks WHERE event_id=?').all(id)) {
+          const start = Number(chunk.start_cp), end = Number(chunk.end_cp);
+          if (!event || event.contentVersion !== Number(chunk.content_version) || !allowed.some(range => range.start <= start && range.end >= end)
+            || createHash('sha256').update(codePointSlice(event.text, start, end)).digest('hex') !== chunk.text_sha256) {
+            this.db.prepare('DELETE FROM h_semantic_chunks WHERE event_id=? AND content_version=? AND start_cp=? AND end_cp=?')
+              .run(id, Number(chunk.content_version), start, end);
+            removed = true;
+          }
+        }
+      }
+      if (removed) this.db.prepare('DELETE FROM h_meta WHERE instr(key,?)=1').run('semantic_index_checkpoint:');
+    });
+  }
+  private citationKey(id: string, revision: number, citation: AssertionCitation) {
+    return JSON.stringify([id, revision, citation.eventId, citation.contentVersion ?? null, citation.start ?? null, citation.end ?? null, citation.role]);
+  }
+  private storeCitation(id: string, revision: number, citation: AssertionCitation) {
+    this.db.prepare('INSERT OR IGNORE INTO h_assertion_citations VALUES(?,?,?,?,?,?,?,?)').run(
+      this.citationKey(id, revision, citation),
+      id, revision, citation.eventId, citation.contentVersion ?? null, citation.start ?? null, citation.end ?? null, citation.role);
+  }
+  assertionCitations(handle: ScopeHandle, id: string, revision?: number): AssertionCitation[] {
+    const assertion = this.assertion(handle, id);
+    if (!assertion) return [];
+    if (revision !== undefined && revision !== assertion.revision && !this.assertionVersion(handle, id, revision)) return [];
+    return this.citationRows(id, revision ?? assertion.revision);
+  }
+  private citationSourceReadable(handle: ScopeHandle, citation: AssertionCitation, strict = false) {
+    const event = this.evidence(handle, citation.eventId);
+    if (!event || (citation.contentVersion !== undefined && citation.contentVersion !== event.contentVersion)) return false;
+    const known = citation.start !== undefined && citation.end !== undefined && citation.contentVersion !== undefined;
+    if (strict && !known) return false;
+    if (known && (!Number.isSafeInteger(citation.start) || !Number.isSafeInteger(citation.end)
+      || citation.start! < 0 || citation.end! <= citation.start! || citation.end! > Array.from(event.text).length)) return false;
+    if (this.fences().some(fence => fence.kind === 'delete' && (fence.objectIds.includes(event.id)
+      || fence.sourceIds.includes(event.id) || fence.sourceIds.includes(event.sourceId) || fence.spans?.some(span => span.eventId === event.id
+        && (!known || span.contentVersion !== citation.contentVersion || span.start < citation.end! && span.end > citation.start!))))) return false;
+    return !this.blockedDeletedLineage(event, known ? { start: citation.start!, end: citation.end! } : undefined, false);
+  }
+  private sourceSpanRestrictions(origin: OriginSpan) {
+    const known = origin.start !== undefined && origin.end !== undefined && origin.contentVersion !== undefined;
+    return this.db.prepare(`SELECT x.event_id AS eventId,x.predicate,x.operation,x.replacement_event_id,
+      s.content_version,s.start_cp,s.end_cp,s.effective_from FROM h_source_restrictions x
+      LEFT JOIN h_source_restriction_spans s ON s.event_id=x.event_id AND s.predicate=x.predicate
+      WHERE x.event_id=? AND (
+      x.predicate='*' OR NOT EXISTS(SELECT 1 FROM h_source_restriction_spans s WHERE s.event_id=x.event_id AND s.predicate=x.predicate)
+      OR (s.effective_from IS NULL OR julianday(s.effective_from) IS NULL OR julianday(s.effective_from)<=julianday(?))
+        AND (?=0 OR s.content_version!=? OR s.start_cp<? AND s.end_cp>?))
+      ORDER BY x.predicate,x.operation,x.replacement_event_id,s.content_version,s.start_cp,s.end_cp,s.effective_from`)
+      .all(origin.eventId, this.clock.now(), Number(known), origin.contentVersion ?? 0, origin.end ?? 0, origin.start ?? 0);
+  }
+  private citationRestrictionState(citation: AssertionCitation) {
+    const event = parse<EvidenceEvent>(this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(citation.eventId));
+    const known = citation.start !== undefined && citation.end !== undefined && citation.contentVersion !== undefined;
+    const origins = event ? this.sourceOrigins(event, known ? { start: citation.start!, end: citation.end! } : undefined).spans : [citation];
+    const unique = new Map<string, Row>();
+    let canReview = known && citation.role !== 'authorization';
+    for (const origin of origins) {
+      const rows = this.sourceSpanRestrictions(origin);
+      if (rows.length) canReview &&= origin.start !== undefined && origin.end !== undefined && rows.every(row => row.predicate !== '*'
+        && row.content_version === origin.contentVersion && row.start_cp !== null && row.end_cp !== null);
+      for (const row of rows) unique.set(JSON.stringify(row), row);
+    }
+    const rows = [...unique.values()].sort((a, b) => canonical(a) < canonical(b) ? -1 : canonical(a) > canonical(b) ? 1 : 0);
+    return { rows, entries: rows.map(row => JSON.stringify(row)), snapshot: JSON.stringify(rows), canReview };
+  }
+  private citationRestrictionsAllow(citation: AssertionCitation) {
+    const state = this.citationRestrictionState(citation);
+    if (!state.rows.length) return true;
+    if (!state.canReview || !citation.restrictionReceipt) return false;
+    if (citation.restrictionReceipt === state.snapshot) return true;
+    try {
+      const saved: unknown = JSON.parse(citation.restrictionReceipt);
+      if (!Array.isArray(saved) || saved.length !== state.rows.length || saved.some(row => !row || typeof row !== 'object' || Array.isArray(row))) return false;
+      const keys = new Set(state.rows.map(row => canonical(row)));
+      // Earlier development receipts covered direct sources only. Bind those
+      // rows to this citation's actual event; they cannot acknowledge a root.
+      const previous = saved.map(row => canonical({ ...row, eventId: row.eventId ?? citation.eventId }));
+      return new Set(previous).size === keys.size && previous.every(key => keys.has(key));
+    } catch { return false; }
+  }
+  /** Only host-loaded current-target citations can carry a stored review receipt. */
+  citationReadable(handle: ScopeHandle, citation: AssertionCitation, strict = false) {
+    return this.citationSourceReadable(handle, citation, strict) && this.citationRestrictionsAllow(citation);
+  }
+  /** Source identity for explaining a revision, without reopening its former
+   * derived wording or treating an old report as a current fact. */
+  citationMetadata(handle: ScopeHandle, citation: AssertionCitation) {
+    if (!this.scope(handle).grants.includes('evidence:read') || !this.citationSourceReadable(handle, citation, true)) return;
+    const event = this.evidence(handle, citation.eventId);
+    if (!event || !this.scope(handle).grants.includes(this.workSourceGrant(event.sourceId))) return;
+    const historical = this.historicalEvidence(handle, event);
+    return { eventId: event.id, contentVersion: event.contentVersion, start: citation.start!, end: citation.end!, role: citation.role,
+      speaker: event.speaker, authority: event.authority, subjectId: event.subjectId, worldId: event.worldId,
+      receivedAt: event.receivedAt, sequence: event.sequence, use: historical.use, bodyProvided: false,
+      read: { tool: 'read_evidence', arguments: { id: event.id, offset: citation.start!, limit: Math.min(1200, citation.end! - citation.start!) } } };
+  }
+  private citationAddress(citation: AssertionCitation) {
+    return JSON.stringify([citation.eventId, citation.contentVersion ?? null, citation.start ?? null, citation.end ?? null]);
+  }
+  citationReviewBaseline(handle: ScopeHandle, citations: AssertionCitation[]) {
+    const baseline = new Map<string, string[]>();
+    for (const citation of citations) {
+      if (!this.citationSourceReadable(handle, citation)) throw new HarnessError('source_suppressed', "The original supporting source is unavailable.");
+      baseline.set(this.citationAddress(citation), this.citationRestrictionState(citation).entries);
+    }
+    return baseline;
+  }
+  /** Finish a semantic commit, never an ordinary save/rebuild/status change.
+   * Existing restrictions must match its pre-write baseline; only the exact
+   * restrictions installed by this same commit may be newly acknowledged. */
+  recordReviewedCitationUse(handle: ScopeHandle, revisions: { id: string; revision: number }[],
+    baseline: Map<string, string[]>, installed: ReviewedSourceRestriction[]) {
+    if (!this.transactionDepth) throw new HarnessError('citation_review_transaction', "A source-review receipt must be saved in the same transaction as its understanding.");
+    const scope = this.scope(handle);
+    if (!scope.infer || !scope.grants.includes('memory:write')) throw new HarnessError('inference_forbidden', "The current scope cannot submit an understanding review.");
+    for (const ref of revisions) {
+      const row = this.db.prepare('SELECT revision FROM h_assertions WHERE id=? AND owner=? AND workspace=? AND subject=? AND world=?')
+        .get(ref.id, scope.principalId, scope.workspaceId, scope.subjectId, scope.worldId);
+      if (!row || Number(row.revision) !== ref.revision) throw new HarnessError('revision_conflict', "The understanding revision changed. No source receipt was issued.");
+      for (const citation of this.citationRows(ref.id, ref.revision)) {
+        if (!this.citationSourceReadable(handle, citation)) throw new HarnessError('source_suppressed', "A supporting source was deleted or changed.");
+        const state = this.citationRestrictionState(citation);
+        if (!state.rows.length) continue;
+        const previous = baseline.get(this.citationAddress(citation)) || [];
+        const newlyReviewed = state.rows.every((restriction, index) => previous.includes(state.entries[index]) || installed.some(change =>
+          change.eventId === restriction.eventId && change.predicate === restriction.predicate && change.operation === restriction.operation
+          && change.replacementEventId === restriction.replacement_event_id && (change.ranges.some(range => range.contentVersion === restriction.content_version
+            && range.start === restriction.start_cp && range.end === restriction.end_cp)
+            || previous.some(entry => {
+              const prior = JSON.parse(entry) as Row;
+              return ['eventId', 'predicate', 'content_version', 'start_cp', 'end_cp', 'effective_from'].every(key => prior[key] === restriction[key]);
+            }))));
+        if (!state.canReview || !newlyReviewed) throw new HarnessError('source_restrictions_changed', "The use agreement for those passages changed. Set aside the old judgment and continue under the current agreement.");
+        this.db.prepare('INSERT OR REPLACE INTO h_citation_restriction_receipts VALUES(?,?)')
+          .run(this.citationKey(ref.id, ref.revision, citation), state.snapshot);
+      }
+    }
+    this.refreshCitationRestrictions();
+  }
+  private citationRows(id: string, revision: number): AssertionCitation[] {
+    return this.db.prepare(`SELECT c.event_id,c.content_version,c.start_cp,c.end_cp,c.role,p.restriction_snapshot
+      FROM h_assertion_citations c LEFT JOIN h_citation_restriction_receipts p ON p.citation_key=c.citation_key
+      WHERE c.assertion_id=? AND c.assertion_revision=? ORDER BY c.event_id,c.start_cp,c.end_cp,c.role`).all(id, revision)
+      .map(row => ({ eventId: String(row.event_id), role: row.role as AssertionCitation['role'],
+        ...(row.restriction_snapshot !== null ? { restrictionReceipt: String(row.restriction_snapshot) } : {}),
+        ...(row.content_version !== null ? { contentVersion: Number(row.content_version) } : {}),
+        ...(row.start_cp !== null && row.end_cp !== null ? { start: Number(row.start_cp), end: Number(row.end_cp) } : {}) }));
+  }
+  /** Historical text is admitted only under that version's actual source set. */
+  assertionVersion(handle: ScopeHandle, id: string, revision: number): Assertion | undefined {
+    if (!this.assertion(handle, id)) return undefined;
+    const row = this.db.prepare('SELECT payload FROM h_assertion_versions WHERE id=? AND revision=?').get(id, revision);
+    if (!row) return undefined;
+    const value = JSON.parse(String(row.payload)) as Assertion;
+    const citations = this.citationRows(id, revision);
+    if (!this.assertionReferenceContextsReadable(handle, value.referenceContexts)
+      || !citations.length || value.evidenceIds.some(eventId => !this.evidence(handle, eventId))
+      || citations.some(citation => !this.citationReadable(handle, citation, true))) return undefined;
+    return value;
+  }
+  /** A revision's commit time belongs to the host transaction, not to the
+   * model's valid-time interpretation or a copied temporal.recordedFrom. */
+  private logAssertionRevision(value: Assertion, previousRevision: number | null, operation = 'host_update') {
+    this.db.prepare(`INSERT INTO h_assertion_revision_log(assertion_id,revision,committed_at,previous_revision,operation)
+      VALUES(?,?,?,?,?)`).run(value.id, value.revision, this.clock.now(), previousRevision, operation);
+  }
+  noteAssertionRevision(handle: ScopeHandle, ref: { id: string; revision: number }, change: {
+    operation: string; causeEventId: string; causeContentVersion: number; causeStart: number; causeEnd: number; relatedAssertionId?: string;
+  }) {
+    const scope = this.scope(handle);
+    const cause = this.evidence(handle, change.causeEventId);
+    if (!this.transactionDepth || !scope.infer || !scope.grants.includes('memory:write')
+      || !cause || cause.contentVersion !== change.causeContentVersion || change.causeStart < 0
+      || change.causeEnd <= change.causeStart || change.causeEnd > Array.from(cause.text).length)
+      throw new HarnessError('assertion_history_transaction', "An understanding change must be recorded in the same transaction as this verified original statement.");
+    this.db.prepare(`UPDATE h_assertion_revision_log SET operation=?,cause_event_id=?,cause_version=?,cause_start=?,cause_end=?,related_assertion_id=?
+      WHERE assertion_id=? AND revision=?`).run(change.operation, change.causeEventId, change.causeContentVersion,
+        change.causeStart, change.causeEnd, change.relatedAssertionId || null, ref.id, ref.revision);
+  }
+  private assertionHistoryAnchor(handle: ScopeHandle, id: string) {
+    this.scope(handle);
+    if (this.hasFence(id)) return undefined;
+    const filter = this.filter(handle);
+    const row = this.db.prepare(`SELECT r.id,r.revision FROM h_assertions r WHERE ${filter.sql} AND r.id=?`).get(...filter.params, id);
+    return row ? { id: String(row.id), revision: Number(row.revision) } : undefined;
+  }
+  assertionHistoryVersion(handle: ScopeHandle, id: string, revision: number): Assertion | undefined {
+    this.refreshCitationRestrictions();
+    const anchor = this.assertionHistoryAnchor(handle, id);
+    if (!anchor || !Number.isSafeInteger(revision) || revision < 1 || revision > anchor.revision) return undefined;
+    const row = this.db.prepare('SELECT payload FROM h_assertion_versions WHERE id=? AND revision=?').get(id, revision);
+    if (!row) return undefined;
+    const value = JSON.parse(String(row.payload)) as Assertion, citations = this.citationRows(id, revision);
+    const change = this.db.prepare(`SELECT cause_event_id,cause_version,cause_start,cause_end
+      FROM h_assertion_revision_log WHERE assertion_id=? AND revision=?`).get(id, revision);
+    if (change?.cause_event_id) {
+      const cause = this.evidence(handle, String(change.cause_event_id));
+      if (!cause || cause.contentVersion !== change.cause_version || !Number.isSafeInteger(change.cause_start)
+        || !Number.isSafeInteger(change.cause_end) || Number(change.cause_start) < 0 || Number(change.cause_end) <= Number(change.cause_start)
+        || !(citations.some(citation => citation.eventId === cause.id && citation.contentVersion === cause.contentVersion
+          && citation.start !== undefined && citation.end !== undefined && citation.start <= Number(change.cause_start)
+          && citation.end >= Number(change.cause_end) && this.citationReadable(handle, citation, true))
+          || this.availableInferenceRanges(cause).some(range => range.start <= Number(change.cause_start) && range.end >= Number(change.cause_end)))) return undefined;
+    }
+    return this.assertionReferenceContextsReadable(handle, value.referenceContexts)
+      && citations.length && value.evidenceIds.every(eventId => !!this.evidence(handle, eventId))
+      && citations.every(citation => this.citationReadable(handle, citation, true)) ? value : undefined;
+  }
+  assertionHistory(handle: ScopeHandle, id: string, options: {
+    snapshotRevision?: number; beforeRevision?: number; limit?: number; knownAt?: string;
+  } = {}) {
+    this.refreshCitationRestrictions();
+    // The object's own scoped identity admits an audit directory. Every old
+    // body still has its independent, current citation gate below.
+    const current = this.assertionHistoryAnchor(handle, id);
+    if (!current) return undefined;
+    const snapshotRevision = options.snapshotRevision ?? current.revision;
+    if (!Number.isSafeInteger(snapshotRevision) || snapshotRevision < 1 || snapshotRevision > current.revision
+      || options.beforeRevision !== undefined && (!Number.isSafeInteger(options.beforeRevision) || options.beforeRevision < 1)
+      || options.knownAt !== undefined && !Number.isFinite(Date.parse(options.knownAt)))
+      throw new HarnessError('assertion_history_range', "The understanding-history revision or time range is invalid.");
+    const before = Math.min(options.beforeRevision ?? snapshotRevision + 1, snapshotRevision + 1);
+    const limit = Math.max(1, Math.min(options.limit ?? 8, 20));
+    const rows = this.db.prepare(`SELECT v.revision,v.payload,l.committed_at,l.previous_revision,l.operation,l.cause_event_id,l.cause_version,l.cause_start,l.cause_end,l.related_assertion_id
+      FROM h_assertion_versions v LEFT JOIN h_assertion_revision_log l ON l.assertion_id=v.id AND l.revision=v.revision
+      WHERE v.id=? AND v.revision<=? AND v.revision<?
+        ${options.knownAt ? 'AND l.committed_at IS NOT NULL AND julianday(l.committed_at)<=julianday(?)' : ''}
+      ORDER BY v.revision DESC LIMIT ?`).all(id, snapshotRevision, before, ...(options.knownAt ? [options.knownAt] : []), limit + 1);
+    const unknown = Number(this.db.prepare(`SELECT COALESCE(max(v.revision),0) AS revision FROM h_assertion_versions v
+      LEFT JOIN h_assertion_revision_log l ON l.assertion_id=v.id AND l.revision=v.revision
+      WHERE v.id=? AND v.revision<=? AND l.assertion_id IS NULL`).get(id, snapshotRevision)?.revision || 0);
+    const selectedRevision = options.knownAt ? this.db.prepare(`SELECT v.revision FROM h_assertion_versions v
+      JOIN h_assertion_revision_log l ON l.assertion_id=v.id AND l.revision=v.revision
+      WHERE v.id=? AND v.revision<=? AND julianday(l.committed_at)<=julianday(?) ORDER BY v.revision DESC LIMIT 1`)
+      .get(id, snapshotRevision, options.knownAt)?.revision : undefined;
+    const knownAtCoverage = options.knownAt && unknown > 0 && unknown >= Number(selectedRevision || 0) ? 'unknown' as const : 'host_recorded' as const;
+    const items = rows.slice(0, limit).map(row => {
+      const revision = Number(row.revision), value = JSON.parse(String(row.payload)) as Assertion;
+      const citations = this.citationRows(id, revision);
+      // Historical reading cannot revive text whose actual sources have since
+      // been corrected, deleted, withdrawn or excluded from this request.
+      const readable = !!this.assertionHistoryVersion(handle, id, revision);
+      const cause = row.cause_event_id ? this.evidence(handle, String(row.cause_event_id)) : undefined;
+      const causeReadable = !!cause && cause.contentVersion === row.cause_version
+        && typeof row.cause_start === 'number' && typeof row.cause_end === 'number'
+        && (citations.some(citation => citation.eventId === cause.id && citation.contentVersion === cause.contentVersion
+          && citation.start !== undefined && citation.end !== undefined && citation.start <= Number(row.cause_start)
+          && citation.end >= Number(row.cause_end) && this.citationReadable(handle, citation, true))
+          || this.availableInferenceRanges(cause).some(range => range.start <= Number(row.cause_start) && range.end >= Number(row.cause_end)));
+      const related = row.related_assertion_id ? this.assertionHistoryAnchor(handle, String(row.related_assertion_id)) : undefined;
+      return { revision, committedAt: typeof row.committed_at === 'string' ? row.committed_at : null,
+        timing: row.committed_at ? 'host_recorded' as const : 'legacy_unknown' as const,
+        operation: typeof row.operation === 'string' ? row.operation : 'unknown',
+        previousRevision: row.previous_revision === null || row.previous_revision === undefined ? null : Number(row.previous_revision),
+        ...(causeReadable ? { cause: { eventId: cause!.id, contentVersion: cause!.contentVersion, start: Number(row.cause_start), end: Number(row.cause_end) } } : {}),
+        ...(related ? { related: { id: related.id, revision: related.revision } } : {}),
+        sourceCoverage: readable ? 'available' as const : 'suppressed' as const,
+        ...(readable ? { assertion: value, citations: citations.map(({ restrictionReceipt: _receipt, ...citation }) => citation) } : {}) };
+    });
+    return { id, currentRevision: current.revision, snapshotRevision, items,
+      ...(options.knownAt ? { selectedRevision: knownAtCoverage === 'unknown' ? null : selectedRevision === undefined ? null : Number(selectedRevision) } : {}),
+      nextBeforeRevision: rows.length > limit ? Number(rows[limit - 1].revision) : null,
+      unknownCommitTimes: unknown > 0,
+      knownAtCoverage };
+  }
+  calendarVersionId(id: string, revision: number) { return 'agenda-version:' + createHash('sha256').update(`${id}:${revision}`).digest('hex'); }
+  registerCalendarVersion(handle: ScopeHandle, id: string, revision: number, producer?: string) {
+    this.scope(handle);
+    const versionId = this.calendarVersionId(id, revision);
+    this.write(() => {
+      this.db.prepare('INSERT OR IGNORE INTO h_calendar_versions VALUES(?,?,?)').run(versionId, id, revision);
+      if (producer && this.db.prepare('SELECT id FROM h_actions WHERE id=?').get(producer)) this.addDependency(handle, { consumerId: versionId, producerId: producer, producerRevision: 0, sensitivity: 'privacy', invalidation: 'block' });
+    });
+    return versionId;
+  }
+  private clearMigrationBackups() {
+    if (this.databasePath === ':memory:') return;
+    const directory = path.dirname(this.databasePath), prefix = path.basename(this.databasePath) + '.pre-harness-v';
+    for (const name of fs.readdirSync(directory)) if (name.startsWith(prefix) && /^\d+\.sqlite$/.test(name.slice(prefix.length))) fs.unlinkSync(path.join(directory, name));
+  }
+  write<T>(fn: () => T): T {
+    if (this.transactionDepth) return fn();
+    this.db.exec('BEGIN IMMEDIATE');
+    this.transactionDepth++;
+    this.afterCommitCallbacks = [];
+    let result: T;
+    try {
+      result = fn();
+      if (result && typeof result === 'object' && typeof (result as any).then === 'function')
+        throw new HarnessError('async_transaction', "Asynchronous services cannot run inside this transaction.");
+      this.fault?.('before_transaction_commit');
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.afterCommitCallbacks = [];
+      this.db.exec('ROLLBACK');
+      throw error;
+    } finally {
+      this.transactionDepth--;
+    }
+    const callbacks = this.afterCommitCallbacks;
+    this.afterCommitCallbacks = [];
+    for (const callback of callbacks) callback();
+    return result!;
+  }
+  afterCommit(callback: () => void) {
+    if (this.transactionDepth) this.afterCommitCallbacks.push(callback);
+    else callback();
+  }
+  /** Host-owned original artifacts must follow the committed source deletion. */
+  onPrivacyCleanup(callback: () => void) { this.privacyCleanupListeners.add(callback); return () => this.privacyCleanupListeners.delete(callback); }
+  getMeta<T>(key: string, fallback?: T): T {
+    const row = this.db.prepare('SELECT value FROM h_meta WHERE key=?').get(key);
+    return row ? JSON.parse(String(row.value)) : (fallback as T);
+  }
+  setMeta(key: string, value: unknown) {
+    this.db
+      .prepare('INSERT INTO h_meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .run(key, JSON.stringify(value));
+  }
+  get epoch() {
+    return this.getMeta<number>('privacy_epoch', 1);
+  }
+  get policyRevision() {
+    return this.getMeta<number>('policy_revision', 1);
+  }
+  get domainRevision() {
+    return this.getMeta<number>('domain_revision', 0);
+  }
+  /** Model adoption of personal understandings. Owner management and write
+   * review still use their original repository operations. */
+  personalMemoryReadable(handle: ScopeHandle) {
+    const scope = this.scope(handle);
+    return scope.sources.includes('profile:self') && scope.grants.includes('evidence:read') && scope.grants.includes('memory:read');
+  }
+  /** Retained chat display belongs to its owner. This waives only the model's
+   * memory-read grant; the version, citation and source gates below still run. */
+  private understandingReceiptReadable(handle: ScopeHandle, localDisplay: boolean) {
+    if (!localDisplay) return this.personalMemoryReadable(handle);
+    const scope = this.scope(handle);
+    return !scope.child && scope.principalId === this.identity.principalId && scope.workspaceId === this.identity.workspaceId
+      && scope.subjectId === scope.principalId && scope.worldId === 'real' && scope.audience === 'self'
+      && scope.sources.includes('profile:self') && scope.grants.includes('evidence:read');
+  }
+  /** Candidate discovery applies read permissions before ranking or paging;
+   * owner maintenance keeps the original unprojected repository operations. */
+  private evidenceDiscoveryFilter(handle: ScopeHandle) {
+    const scope = this.scope(handle), filter = this.filter(handle);
+    return { sql: `${filter.sql} AND ? AND (? OR r.source!='profile:self' OR r.id IN (SELECT value FROM json_each(?)))`,
+      params: [...filter.params, scope.grants.includes('evidence:read') ? 1 : 0,
+        scope.grants.includes('memory:read') ? 1 : 0, JSON.stringify(scope.currentEventIds)] };
+  }
+  filter(handle: ScopeHandle, alias = 'r'): { sql: string; params: SQLInputValue[] } {
+    const s = this.scope(handle),
+      prefix = alias + '.';
+    const persistentSources = s.sources.filter((source) => source !== 'current');
+    return {
+      sql: `${prefix}owner=? AND ${prefix}workspace=? AND ${prefix}subject=? AND ${prefix}world=?
+        AND (${prefix}source IN (${placeholders(persistentSources)}) ${s.currentEventIds.length ? `OR ${prefix}id IN (${placeholders(s.currentEventIds)})` : ''})
+        AND ${prefix}purpose IN (${placeholders(s.purposes)})
+        AND ${prefix}audience IN (${placeholders(s.audience === 'self' ? ['self', 'public'] : [s.audience, 'public'])})
+        AND (${prefix}expires_at IS NULL OR julianday(${prefix}expires_at)>julianday(?))
+        ${s.grants.includes('restricted:read') ? '' : `AND ${prefix}sensitivity!='restricted'`}`,
+      params: [
+        s.principalId,
+        s.workspaceId,
+        s.subjectId,
+        s.worldId,
+        ...persistentSources,
+        ...s.currentEventIds,
+        ...s.purposes,
+        ...(s.audience === 'self' ? ['self', 'public'] : [s.audience, 'public']),
+        this.clock.now(),
+      ],
+    };
+  }
+  private envelope(
+    e: {
+      ownerId: string;
+      workspaceId: string;
+      subjectId: string;
+      worldId: string;
+      label: EvidenceEvent['label'];
+    },
+    sourceId: string,
+  ): SQLInputValue[] {
+    return [
+      e.ownerId,
+      e.workspaceId,
+      e.subjectId,
+      e.worldId,
+      sourceId,
+      e.label.purpose,
+      e.label.audience,
+      e.label.sensitivity,
+      e.label.retention,
+      e.label.infer ? 1 : 0,
+      e.label.expiresAt || null,
+    ];
+  }
+  private recordAccess(handle: ScopeHandle, row: Row, kind: string) {
+    const scope = this.scope(handle);
+    this.access.push({
+      principalId: scope.principalId,
+      scopeId: handle.id,
+      purposes: scope.purposes,
+      source: scope.currentEventIds.includes(String(row.id)) ? 'current' : String(row.source),
+      objectId: String(row.id),
+      kind,
+    });
+  }
+  hasFence(objectId: string, sourceId?: string): boolean {
+    if (objectId.startsWith('workout:') && (this.withdrawnWorkouts.has(objectId)
+      || this.getMeta('withdrawn:' + objectId, false))) return true;
+    return this.fences().some(
+      (f) =>
+        f.kind === 'delete' &&
+        (f.objectIds.includes(objectId) ||
+          f.sourceIds.includes(objectId) ||
+          (!!sourceId && f.sourceIds.includes(sourceId))),
+    );
+  }
+  /** Cancel begins here, before the broader durable cleanup. No workout body is retained. */
+  withdrawWorkoutSource(workoutId: string): void {
+    const objectId = workoutSourceObjectId(workoutId);
+    this.withdrawnWorkouts.add(objectId);
+    // Keep the exact tombstone in SQLite too, if writing the separate fence file fails.
+    if (!this.getMeta('withdrawn:' + objectId, false)) this.write(() => this.setMeta('withdrawn:' + objectId, true));
+  }
+  sourceOrigins(source: LineageSource, range?: { start: number; end: number }) { return sourceOriginSpans(this.db, source, range); }
+  sameSourceOrigin(left: EvidenceEvent, leftRange: { start: number; end: number }, right: EvidenceEvent, rightRange: { start: number; end: number }) {
+    return sameSourceOrigins(this.sourceOrigins(left, leftRange), this.sourceOrigins(right, rightRange));
+  }
+  private validateLocalOrigin(eventId: string) {
+    const row = this.db.prepare('SELECT owner,workspace FROM h_evidence WHERE id=?').get(eventId);
+    if (row && (row.owner !== this.identity.principalId || row.workspace !== this.identity.workspaceId))
+      throw new HarnessError('source_lineage_forbidden', "The source relationship exceeds current ownership. The source cannot be rewritten or deleted.");
+  }
+  private blockedDeletedLineage(input: LineageSource & { text: string }, range?: { start: number; end: number }, allowMasked = true) {
+    const chars = Array.from(input.text), selected = range || { start: 0, end: chars.length };
+    const fences = this.fences().filter(fence => fence.kind === 'delete');
+    if (!fences.length) return false;
+    const origins = this.sourceOrigins(input, selected).spans;
+    return origins.some(origin => this.hasFence(origin.eventId, origin.sourceId) || fences.some(fence => (fence.spans || []).some(cut => {
+      if (cut.eventId !== origin.eventId) return false;
+      if (origin.contentVersion !== cut.contentVersion || origin.start === undefined || origin.end === undefined
+        || origin.end - origin.start !== selected.end - selected.start) return true;
+      const start = Math.max(cut.start, origin.start), end = Math.min(cut.end, origin.end);
+      if (end <= start) return false;
+      // Retain an already redacted raw copy's legal remainder. A citation can
+      // never use these coordinates, even when their body is now a mask.
+      return !allowMasked || chars.slice(selected.start + start - origin.start, selected.start + end - origin.start).some(char => char !== '█');
+    })));
+  }
+  /** Build the durable erasure addresses before any source body is masked.
+   * Exact copies/projections share their origin; independent repetitions do not. */
+  sourceErasure(spans: NonNullable<PrivacyFence['spans']>, unknownEventIds: string[] = []) {
+    const locations = new Map<string, NonNullable<PrivacyFence['spans']>[number]>(), whole = new Set<string>();
+    const add = (origin: OriginSpan) => {
+      this.validateLocalOrigin(origin.eventId);
+      if (origin.contentVersion === undefined || origin.start === undefined || origin.end === undefined) whole.add(origin.eventId);
+      else {
+        const span = { eventId: origin.eventId, contentVersion: origin.contentVersion, start: origin.start, end: origin.end };
+        locations.set(canonical(span), span);
+      }
+    };
+    const selected: OriginSpan[] = [...spans, ...unknownEventIds.map(eventId => ({ eventId }))];
+    for (const target of selected) {
+      const source = parse<EvidenceEvent>(this.db.prepare('SELECT payload FROM h_evidence WHERE id=? AND owner=? AND workspace=?')
+        .get(target.eventId, this.identity.principalId, this.identity.workspaceId));
+      if (!source) { whole.add(target.eventId); continue; }
+      const known = target.contentVersion === source.contentVersion && target.start !== undefined && target.end !== undefined
+        && Number.isSafeInteger(target.start) && Number.isSafeInteger(target.end) && target.start >= 0
+        && target.end > target.start && target.end <= Array.from(source.text).length;
+      for (const origin of this.sourceOrigins(source, known ? { start: target.start!, end: target.end! } : undefined).spans) add(origin);
+    }
+    const canonicalSpans = [...locations.values()], targets = [...new Set([...whole, ...canonicalSpans.map(span => span.eventId)])];
+    if (targets.length) {
+      const rows = this.db.prepare(`WITH RECURSIVE family(id) AS (
+        SELECT value FROM json_each(?) UNION SELECT r.event_id FROM h_evidence_roots r JOIN family f ON r.root_id=f.id)
+        SELECT e.payload FROM h_evidence e JOIN family f ON f.id=e.id WHERE e.owner=? AND e.workspace=? AND e.status!='deleted'`)
+        .all(JSON.stringify(targets), this.identity.principalId, this.identity.workspaceId);
+      for (const row of rows) {
+        const source = parse<EvidenceEvent>(row)!, length = Array.from(source.text).length;
+        for (const origin of this.sourceOrigins(source, { start: 0, end: length }).spans) {
+          if (whole.has(origin.eventId)) { whole.add(source.id); break; }
+          for (const cut of canonicalSpans.filter(span => span.eventId === origin.eventId)) {
+            if (origin.contentVersion !== cut.contentVersion || origin.start === undefined || origin.end === undefined || origin.end - origin.start !== length) {
+              whole.add(source.id); break;
+            }
+            const start = Math.max(cut.start, origin.start), end = Math.min(cut.end, origin.end);
+            if (end > start) add({ eventId: source.id, contentVersion: source.contentVersion, start: start - origin.start, end: end - origin.start });
+          }
+        }
+      }
+    }
+    return { spans: [...locations.values()].filter(span => !whole.has(span.eventId)), sourceIds: [...whole] };
+  }
+  /** Older versions could ingest an unlocated copy after a partial deletion.
+   * Retire only that forbidden lineage; broad old cleanups must not run again
+   * over later independent work or accepted business records. */
+  private removeDeletedSourceReplays() {
+    const roots = [...new Set(this.fences().filter(fence => fence.kind === 'delete').flatMap(fence => (fence.spans || []).map(span => span.eventId)))];
+    if (!roots.length) return;
+    const rows = this.db.prepare(`WITH RECURSIVE family(id) AS (
+      SELECT value FROM json_each(?) UNION SELECT r.event_id FROM h_evidence_roots r JOIN family f ON r.root_id=f.id)
+      SELECT DISTINCT e.payload FROM h_evidence e JOIN family f ON f.id=e.id
+      WHERE e.owner=? AND e.workspace=? AND e.status!='deleted'`).all(JSON.stringify(roots), this.identity.principalId, this.identity.workspaceId);
+    const ids = rows.map(row => parse<EvidenceEvent>(row)!).filter(event => this.blockedDeletedLineage(event)).map(event => event.id);
+    if (!ids.length) return;
+    const fence = this.establishFence({ kind: 'delete', objectIds: ids, sourceIds: [] });
+    this.cleanupFence(fence);
+    this.checkpointPrivacy();
+  }
+  ingest(handle: ScopeHandle, input: Omit<EvidenceEvent, 'sequence'>): EvidenceEvent {
+    const scope = this.scope(handle);
+    if (scope.retention === 'session_only' || input.label.retention === 'session_only')
+      throw new HarnessError('ephemeral_only', "This turn's content will not be persisted.");
+    if (
+      scope.principalId !== input.ownerId ||
+      scope.workspaceId !== input.workspaceId ||
+      scope.subjectId !== input.subjectId ||
+      scope.worldId !== input.worldId
+    )
+      throw new HarnessError('scope_mismatch', "Source ownership does not match.");
+    if (!scope.sources.includes(input.sourceId) && !scope.currentEventIds.includes(input.id))
+      throw new HarnessError('source_forbidden', "The source is unauthorized.");
+    if (input.label.sensitivity === 'restricted')
+      throw new HarnessError('protection_unavailable', "The whole database is not encrypted. Restricted material is used only for this turn.");
+    if (this.hasFence(input.id, input.sourceId) || input.roots.some((root) => this.hasFence(root)))
+      throw new HarnessError('deleted_source', "This old source was deleted and cannot be replayed.");
+    if (this.blockedDeletedLineage(input))
+      throw new HarnessError('deleted_source_range', "This copy still derives from a forgotten passage and cannot restore it under a new identifier. Unrelated exact passages may remain.");
+    const existing = this.db
+      .prepare('SELECT payload FROM h_evidence WHERE id=? AND owner=? AND workspace=?')
+      .get(input.id, scope.principalId, scope.workspaceId);
+    if (existing) {
+      const event = parse<EvidenceEvent>(existing)!;
+      if (event.text !== input.text || event.contentVersion !== input.contentVersion)
+        throw new HarnessError('event_conflict', "The same event identifier has different original text.");
+      return event;
+    }
+    const event = evidenceSchema.parse({ ...input, sequence: this.getMeta<number>('received_seq', 0) + 1 });
+    this.write(() => {
+      this.db
+        .prepare('INSERT INTO h_evidence VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(
+          event.id,
+          ...this.envelope(event, event.sourceId),
+          event.contentVersion,
+          event.sequence,
+          event.receivedAt,
+          event.status,
+          event.text,
+          JSON.stringify(event),
+        );
+      for (const root of event.roots)
+        this.db.prepare('INSERT INTO h_evidence_roots VALUES(?,?)').run(event.id, root);
+      const points = Array.from(event.text);
+      for (let start = 0; start < points.length; start += 1800) {
+        const end = Math.min(points.length, start + 1800),
+          spanId = event.id + ':' + event.contentVersion + ':' + start;
+        this.db
+          .prepare('INSERT INTO h_spans VALUES(?,?,?,?,?,?,0)')
+          .run(
+            spanId,
+            event.id,
+            event.contentVersion,
+            start,
+            end,
+            event.label.infer && event.speaker === 'user' ? 'pending' : 'quote_or_hypothesis',
+          );
+      }
+      this.setMeta('received_seq', event.sequence);
+      this.outbox('extract', event.id);
+      this.outbox('index_evidence', event.id);
+    });
+    this.afterCommit(() => this.fault?.('after_event_and_outbox_commit'));
+    return event;
+  }
+  evidence(handle: ScopeHandle, id: string): EvidenceEvent | undefined {
+    const f = this.filter(handle);
+    const row = this.db
+      .prepare(`SELECT r.* FROM h_evidence r WHERE ${f.sql} AND r.id=? AND r.status!='deleted'`)
+      .get(...f.params, id);
+    if (row) this.recordAccess(handle, row, 'evidence');
+    return parse<EvidenceEvent>(row);
+  }
+  sourceRestrictions(handle: ScopeHandle, eventId: string) {
+    if (!this.evidence(handle, eventId)) return [];
+    return this.db.prepare('SELECT predicate,operation,replacement_event_id FROM h_source_restrictions WHERE event_id=? ORDER BY predicate').all(eventId).map(row => {
+      const spans = this.db.prepare('SELECT content_version,start_cp,end_cp,effective_from FROM h_source_restriction_spans WHERE event_id=? AND predicate=? ORDER BY start_cp,end_cp').all(eventId, String(row.predicate));
+      const dates = spans.map(span => span.effective_from).filter((date): date is string => typeof date === 'string' && Number.isFinite(Date.parse(date)))
+        .sort((a, b) => Date.parse(a) - Date.parse(b));
+      return { predicate: String(row.predicate), operation: String(row.operation),
+        replacementEventId: row.replacement_event_id ? String(row.replacement_event_id) : null,
+        ranges: spans.map(span => ({ contentVersion: Number(span.content_version), start: Number(span.start_cp), end: Number(span.end_cp) })),
+        rangeUnknown: !spans.length, effectiveFrom: dates.length === spans.length ? dates[0] || null : null };
+    });
+  }
+  /** Host-only projection of inherited stops. Parent bodies are compared in
+   * SQL, never returned or added to the caller's read scope. */
+  private lineageRestrictionState(event: EvidenceEvent, location?: { start: number; end: number }) {
+    const entries: Row[] = [];
+    let wholeSource = false;
+    const selected = location || { start: 0, end: Array.from(event.text).length };
+    const origins = this.sourceOrigins(event, selected).spans.filter(origin => origin.eventId !== event.id);
+    for (const origin of origins) {
+      const rootId = origin.eventId;
+      const restrictions = this.db.prepare(`SELECT x.predicate,x.operation,x.replacement_event_id,
+        s.content_version,s.start_cp,s.end_cp,s.effective_from FROM h_source_restrictions x
+        LEFT JOIN h_source_restriction_spans s ON s.event_id=x.event_id AND s.predicate=x.predicate
+        WHERE x.event_id=? AND (x.predicate='*' OR s.event_id IS NULL OR s.effective_from IS NULL
+          OR julianday(s.effective_from) IS NULL OR julianday(s.effective_from)<=julianday(?))
+        ORDER BY x.predicate,s.content_version,s.start_cp,s.end_cp,s.effective_from`)
+        .all(rootId, this.clock.now());
+      if (!restrictions.length) continue;
+      for (const restriction of restrictions) {
+        const known = origin.start !== undefined && origin.end !== undefined && restriction.predicate !== '*' && restriction.content_version === origin.contentVersion
+          && typeof restriction.start_cp === 'number' && typeof restriction.end_cp === 'number';
+        if (known && (Number(restriction.end_cp) <= origin.start! || Number(restriction.start_cp) >= origin.end!)) continue;
+        wholeSource ||= !known;
+        entries.push({ rootId, sourceVersion: event.contentVersion, rootVersion: origin.contentVersion ?? null,
+          ...restriction, originStart: origin.start ?? null, originEnd: origin.end ?? null, rangeUnknown: !known });
+      }
+    }
+    return { entries, wholeSource };
+  }
+  sourceLineageRestricted(event: EvidenceEvent, location?: { start: number; end: number }) {
+    return this.lineageRestrictionState(event, location).entries.length > 0;
+  }
+  /** Host-only, body-free baseline for child work. Future local changes enter
+   * the active snapshot when they take effect; whole-source stops fail closed. */
+  sourceRestrictionSnapshot(handle: ScopeHandle): SourceRestrictionSnapshot {
+    const f = this.filter(handle), values = new Map<string, { metadata: string; wholeSource: boolean }>();
+    const rows = this.db.prepare(`SELECT r.id AS event_id,r.version AS source_version,x.predicate,x.operation,x.replacement_event_id,
+      s.content_version,s.start_cp,s.end_cp,s.effective_from
+      FROM h_evidence r JOIN h_source_restrictions x ON x.event_id=r.id
+      LEFT JOIN h_source_restriction_spans s ON s.event_id=x.event_id AND s.predicate=x.predicate
+      WHERE ${f.sql} AND r.status!='deleted'
+        AND (x.predicate='*' OR s.event_id IS NULL OR s.effective_from IS NULL OR julianday(s.effective_from) IS NULL OR julianday(s.effective_from)<=julianday(?))
+      ORDER BY r.id,x.predicate,s.content_version,s.start_cp,s.end_cp,s.effective_from`).all(...f.params, this.clock.now());
+    for (const row of rows) {
+      const id = String(row.event_id), prior = values.get(id);
+      values.set(id, { metadata: (prior?.metadata || '') + JSON.stringify({ sourceVersion: row.source_version,
+        predicate: row.predicate, operation: row.operation, replacementEventId: row.replacement_event_id,
+        contentVersion: row.content_version, start: row.start_cp, end: row.end_cp, effectiveFrom: row.effective_from }) + '\n',
+        wholeSource: !!prior?.wholeSource || row.predicate === '*' || row.content_version === null || row.start_cp === null || row.end_cp === null });
+    }
+    const derived = this.db.prepare(`WITH RECURSIVE family(id) AS (
+      SELECT event_id FROM h_source_restrictions UNION SELECT roots.event_id FROM h_evidence_roots roots JOIN family f ON roots.root_id=f.id)
+      SELECT DISTINCT r.id,r.payload FROM h_evidence r JOIN family f ON f.id=r.id
+      WHERE ${f.sql} AND r.status!='deleted' ORDER BY r.id`).all(...f.params);
+    for (const row of derived) {
+      const state = this.lineageRestrictionState(parse<EvidenceEvent>(row)!);
+      if (!state.entries.length) continue;
+      const id = String(row.id), prior = values.get(id);
+      values.set(id, { metadata: (prior?.metadata || '') + JSON.stringify(state.entries), wholeSource: !!prior?.wholeSource || state.wholeSource });
+    }
+    return values;
+  }
+  sourceRestrictionsChanged(handle: ScopeHandle, baseline: SourceRestrictionSnapshot, evidenceIds: readonly string[]) {
+    const current = this.sourceRestrictionSnapshot(handle);
+    return evidenceIds.some(id => current.get(id)?.wholeSource
+      || current.get(id)?.metadata !== baseline.get(id)?.metadata);
+  }
+  restrictSource(handle: ScopeHandle, eventId: string, predicate: string, operation: string, replacementEventId: string | null,
+    ranges: { contentVersion: number; start: number; end: number }[], effectiveFrom: string, deferCitationRefresh = false) {
+    if (deferCitationRefresh && !this.transactionDepth) throw new HarnessError('citation_review_transaction', "Deferred source-invalidation checks must run inside the complete commit transaction.");
+    if (!this.evidence(handle, eventId)) throw new HarnessError('source_forbidden', "This source's use scope cannot be changed.");
+    this.write(() => {
+      this.writeSourceRestriction(eventId, predicate, operation, replacementEventId, ranges, effectiveFrom);
+      if (!deferCitationRefresh) this.refreshCitationRestrictions();
+    });
+  }
+  private writeSourceRestriction(eventId: string, predicate: string, operation: string, replacementEventId: string | null,
+    ranges: ReviewedSourceRestriction['ranges'], effectiveFrom: string) {
+    const alreadyWhole = !!this.db.prepare(`SELECT 1 FROM h_source_restrictions x WHERE x.event_id=? AND x.predicate=?
+      AND NOT EXISTS(SELECT 1 FROM h_source_restriction_spans s WHERE s.event_id=x.event_id AND s.predicate=x.predicate)`).get(eventId, predicate);
+    this.db.prepare(`INSERT INTO h_source_restrictions VALUES(?,?,?,?) ON CONFLICT(event_id,predicate)
+      DO UPDATE SET operation=excluded.operation,replacement_event_id=excluded.replacement_event_id`).run(eventId, predicate, operation, replacementEventId);
+    if (!ranges.length) this.db.prepare('DELETE FROM h_source_restriction_spans WHERE event_id=? AND predicate=?').run(eventId, predicate);
+    else if (!alreadyWhole) for (const range of ranges) this.db.prepare(`INSERT INTO h_source_restriction_spans VALUES(?,?,?,?,?,?)
+      ON CONFLICT(event_id,predicate,content_version,start_cp,end_cp) DO UPDATE SET effective_from=CASE
+        WHEN julianday(effective_from) IS NULL OR julianday(excluded.effective_from) IS NULL THEN NULL
+        WHEN julianday(effective_from)<=julianday(excluded.effective_from) THEN effective_from ELSE excluded.effective_from END`)
+      .run(eventId, predicate, range.contentVersion, range.start, range.end, effectiveFrom);
+  }
+  /** The permitted citation is the authority for restricting its own origin.
+   * This never loads ancestor bodies into the caller's scope. */
+  restrictCitationOrigins(handle: ScopeHandle, citations: AssertionCitation[], predicate: string, operation: string,
+    replacementEventId: string | null, effectiveFrom: string, deferCitationRefresh = false): ReviewedSourceRestriction[] {
+    if (deferCitationRefresh && !this.transactionDepth) throw new HarnessError('citation_review_transaction', "Source verification must run in the same commit transaction.");
+    const scope = this.scope(handle);
+    if (!scope.infer || !scope.grants.includes('memory:write')) throw new HarnessError('inference_forbidden', "The current scope cannot change understanding sources.");
+    const targets = new Map<string, { unknown: boolean; ranges: ReviewedSourceRestriction['ranges'] }>();
+    for (const citation of citations) {
+      const source = this.evidence(handle, citation.eventId);
+      if (!source || !this.citationSourceReadable(handle, citation)) throw new HarnessError('source_forbidden', "A supporting source is unavailable.");
+      const known = citation.contentVersion !== undefined && citation.start !== undefined && citation.end !== undefined;
+      for (const origin of this.sourceOrigins(source, known ? { start: citation.start!, end: citation.end! } : undefined).spans) {
+        this.validateLocalOrigin(origin.eventId);
+        const target = targets.get(origin.eventId) || { unknown: false, ranges: [] };
+        if (origin.contentVersion === undefined || origin.start === undefined || origin.end === undefined) target.unknown = true;
+        else if (!target.ranges.some(range => range.contentVersion === origin.contentVersion && range.start === origin.start && range.end === origin.end))
+          target.ranges.push({ contentVersion: origin.contentVersion, start: origin.start, end: origin.end });
+        targets.set(origin.eventId, target);
+      }
+    }
+    const installed = [...targets].map(([eventId, target]) => ({ eventId, predicate, operation, replacementEventId, ranges: target.unknown ? [] : target.ranges }));
+    this.write(() => {
+      for (const restriction of installed) this.writeSourceRestriction(restriction.eventId, predicate, operation, replacementEventId, restriction.ranges, effectiveFrom);
+      if (!deferCitationRefresh) this.refreshCitationRestrictions();
+    });
+    return installed;
+  }
+  /** Metadata-only retirement at writes and reads also covers future-effective
+   * corrections. Exact disjoint citations do not share an invalidation. */
+  private refreshCitationRestrictions() {
+    const affected = () => this.db.prepare(`WITH RECURSIVE family(id) AS (
+      SELECT event_id FROM h_source_restrictions UNION SELECT roots.event_id FROM h_evidence_roots roots JOIN family f ON roots.root_id=f.id)
+      SELECT DISTINCT a.id,a.payload FROM h_assertions a
+      JOIN h_assertion_citations c ON c.assertion_id=a.id AND c.assertion_revision=a.revision
+      JOIN family f ON f.id=c.event_id
+      WHERE a.owner=? AND a.workspace=? AND a.status IN ('active','candidate')`).all(this.identity.principalId, this.identity.workspaceId);
+    let rows = affected();
+    if (!rows.length) return;
+    this.write(() => {
+      for (;;) {
+        let retired = false;
+        for (const row of rows) {
+          const assertion = JSON.parse(String(row.payload)) as Assertion;
+          const invalid = this.citationRows(assertion.id, assertion.revision).filter(citation => !this.citationRestrictionsAllow(citation));
+          if (!invalid.length) continue;
+          if (invalid.some(citation => citation.role === 'authorization')) for (const citation of this.citationRows(assertion.id, assertion.revision).filter(value => value.role === 'primary')) {
+            const projected = parse<EvidenceEvent>(this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(citation.eventId));
+            if (!projected?.parentEventId || projected.locator?.kind !== 'text') continue;
+            projected.label.infer = false;
+            this.db.prepare('UPDATE h_evidence SET infer=0,payload=? WHERE id=?').run(JSON.stringify(projected), projected.id);
+            this.db.prepare("INSERT OR REPLACE INTO h_source_restrictions VALUES(?,'*','AUTHORIZATION_RETRACT',NULL)").run(projected.id);
+          }
+          this.saveAssertionWithoutScope({ ...assertion, status: 'inactive', verification: 'pending', revision: assertion.revision + 1 });
+          this.invalidate(assertion.id, 'supporting_source_changed');
+          retired = true;
+        }
+        // Retirement can stop a projected evidence source. Close that finite
+        // cascade before a single caller receives any affected active row.
+        if (!retired) break;
+        rows = affected();
+        if (!rows.length) break;
+      }
+    });
+  }
+  refreshSourceConstraints() { this.refreshCitationRestrictions(); }
+  private saveAssertionWithoutScope(value: Assertion) {
+    const previous = this.citationRows(value.id, value.revision - 1);
+    this.db.prepare('UPDATE h_assertions SET status=?,revision=?,payload=? WHERE id=?').run(value.status, value.revision, JSON.stringify(value), value.id);
+    this.db.prepare('INSERT INTO h_assertion_versions VALUES(?,?,?)').run(value.id, value.revision, JSON.stringify(value));
+    this.logAssertionRevision(value, value.revision - 1, 'source_constraint');
+    for (const citation of previous) this.storeCitation(value.id, value.revision, citation);
+    this.outbox('assertion_changed', value.id);
+  }
+  historicalEvidence(handle: ScopeHandle, event: EvidenceEvent) {
+    this.refreshCitationRestrictions();
+    const restrictions = this.sourceRestrictions(handle, event.id);
+    if (this.sourceLineageRestricted(event)) restrictions.push({ predicate: 'restricted_source_lineage', operation: 'RECHECK',
+      replacementEventId: null, ranges: [], rangeUnknown: true, effectiveFrom: null });
+    return { ...event, use: restrictions.length ? 'historical_only' as const : 'source_evidence' as const, restrictions };
+  }
+  evidenceList(handle: ScopeHandle, limit = 100, after = 0): EvidenceEvent[] {
+    const f = this.filter(handle);
+    const rows = this.db
+      .prepare(
+        `SELECT r.* FROM h_evidence r WHERE ${f.sql} AND r.status!='deleted' AND r.seq>?
+      AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id) ORDER BY r.seq DESC LIMIT ?`,
+      )
+      .all(...f.params, after, Math.min(500, limit));
+    return rows.map((row) => {
+      this.recordAccess(handle, row, 'evidence');
+      return parse<EvidenceEvent>(row)!;
+    });
+  }
+  /** Original-source browsing is independent of extraction and literal search.
+   * Keyset pagination fixes the upper sequence while rechecking current policy. */
+  evidenceBrowsePage(handle: ScopeHandle, options: { sourceIds: string[]; receivedFrom?: string; receivedBefore?: string;
+    snapshot: number; before: number; limit: number }): EvidenceEvent[] {
+    const f = this.evidenceDiscoveryFilter(handle);
+    if (!options.sourceIds.length) return [];
+    const rows = this.db.prepare(`SELECT r.* FROM h_evidence r WHERE ${f.sql} AND r.status!='deleted'
+      AND r.source IN (${placeholders(options.sourceIds)}) AND r.seq<=? AND r.seq<?
+      ${options.receivedFrom ? 'AND julianday(r.received_at)>=julianday(?)' : ''}
+      ${options.receivedBefore ? 'AND julianday(r.received_at)<julianday(?)' : ''}
+      AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id AND x.predicate='*')
+      ORDER BY r.seq DESC LIMIT ?`).all(...f.params, ...options.sourceIds, options.snapshot, options.before,
+        ...(options.receivedFrom ? [options.receivedFrom] : []), ...(options.receivedBefore ? [options.receivedBefore] : []),
+        Math.max(1, Math.min(options.limit, 51)));
+    return rows.map(row => { this.recordAccess(handle, row, 'source_browse'); return parse<EvidenceEvent>(row)!; });
+  }
+  sessionEvidence(handle: ScopeHandle, sessionId: string, limit = 4): EvidenceEvent[] {
+    const f = this.filter(handle);
+    const rows = this.db
+      .prepare(
+        `SELECT r.* FROM h_evidence r JOIN messages m ON m.id=r.id WHERE ${f.sql} AND m.session_id=? AND r.status!='deleted'
+      AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id) ORDER BY r.seq DESC LIMIT ?`,
+      )
+      .all(...f.params, sessionId, Math.min(limit, 8));
+    return rows.map((row) => {
+      this.recordAccess(handle, row, 'session_reference');
+      return parse<EvidenceEvent>(row)!;
+    });
+  }
+  private conversationPlanningMetadata(sessionId: string, messageIds?: ReadonlySet<string>) {
+    if (messageIds && !messageIds.size) return [];
+    const selected = messageIds ? JSON.stringify([...messageIds]) : undefined;
+    const candidates = this.db.prepare(`SELECT id,json_extract(payload,'$.contextReceipt.planningProvenance') AS provenance,
+      json_extract(payload,'$.contextReceipt.id') AS receipt_id,
+      json_extract(payload,'$.contextReceipt.privacyEpoch') AS receipt_epoch,
+      json_extract(payload,'$.contextReceipt.providedEvidenceIds') AS evidence_ids,
+      json_type(payload,'$.releaseArtifacts') AS releases_type,
+      (SELECT json_group_array(json_object('id',json_extract(draft.value,'$.id'),'revision',json_extract(draft.value,'$.revision'),
+        'privacyEpoch',json_extract(draft.value,'$.privacyEpoch'),'ownerId',json_extract(draft.value,'$.ownerId'),
+        'workspaceId',json_extract(draft.value,'$.workspaceId'),'sourceIds',json_extract(draft.value,'$.sourceIds'),
+        'sourceMessageId',json_extract(draft.value,'$.sourceMessageId'),'sourceMessageIds',json_extract(draft.value,'$.sourceMessageIds'),
+        'sourceMessageVersions',json_extract(draft.value,'$.sourceMessageVersions'),'basedOnObjects',json_extract(draft.value,'$.basedOnObjects'),
+        'basedOnReleases',json_extract(draft.value,'$.basedOnReleases'),
+        'sourceReceipts',(SELECT json_group_array(json((SELECT json_group_object(
+          CASE field.key WHEN 'campusReadingAddresses' THEN 'campusReadingProofs' ELSE field.key END,
+          CASE WHEN field.key='campusReadingAddresses' THEN CASE WHEN field.type='array'
+            THEN json((SELECT json_group_array(json_extract(address.value,'$.snapshot')) FROM json_each(field.value) address)) ELSE NULL END
+            WHEN field.type IN ('array','object') THEN json(field.value) ELSE field.value END)
+          FROM json_each(receipt.value) field WHERE field.key IN ('id','privacyEpoch','providedEvidenceIds','providedSourceIds','providedObjectVersions',
+            'planningProvenance','historicalAssertionVersions','learningProcessVersions','workSourceBindings','reflectiveLetterSources',
+            'assistantWorkSources','assistantTextSources','personalMethodSources','noteSources','workoutSources','campusSensitiveReads','campusReadingProofs','campusReadingSources',
+             'campusReadingIncomplete','interactiveProgramSources','toolAttempts','campusReadingAddresses','releaseSources','materialNavigationSources','spatialSources')
+            AND (field.key!='campusReadingAddresses' OR json_type(receipt.value,'$.campusReadingProofs') IS NULL))))
+          FROM json_each(draft.value,'$.sourceReceipts') receipt))) FROM json_each(payload,'$.releaseArtifacts') draft) AS release_headers,
+      (json_type(payload,'$.scopeSummary.release')='object' AND json_extract(payload,'$.scopeSummary.audience') IN ('group','public')) AS legacy_release,
+      json_extract(payload,'$.contextReceipt.releaseSources') AS release_sources,
+      json_type(payload,'$.contextReceipt.releaseSources') AS release_sources_type,
+      json_extract(payload,'$.contextReceipt.materialNavigationSources') AS material_navigation,
+      json_type(payload,'$.contextReceipt.materialNavigationSources') AS material_navigation_type,
+      json_extract(payload,'$.contextReceipt.spatialSources') AS spatial_sources,
+      json_type(payload,'$.contextReceipt.spatialSources') AS spatial_sources_type,
+      json_extract(payload,'$.contextReceipt.workoutSources') AS workout_sources,
+      json_type(payload,'$.contextReceipt.workoutSources') AS workout_sources_type,
+      json_extract(payload,'$.contextReceipt.providedSourceIds') AS provided_sources,
+      json_extract(payload,'$.contextReceipt.providedObjectVersions') AS object_versions,
+      (SELECT json_group_array(json_object('accepted',json('true'),'sourceEventId',json_extract(image.value,'$.sourceEventId'),
+        'sourceContentVersion',json_extract(image.value,'$.sourceContentVersion'),'sha256',json_extract(image.value,'$.sha256')))
+        FROM json_each(payload,'$.contextReceipt.imageRequests') image WHERE json_extract(image.value,'$.accepted')=1
+        AND json_type(image.value,'$.sourceEventId')='text' AND json_type(image.value,'$.sourceContentVersion')='integer') AS image_requests,
+      json_extract(payload,'$.contextReceipt.historicalAssertionVersions') AS historical,
+      json_extract(payload,'$.contextReceipt.learningProcessVersions') AS learning,
+      json_extract(payload,'$.contextReceipt.reflectiveLetterSources') AS reflective_letters,
+      json_type(payload,'$.contextReceipt.reflectiveLetterSources') AS reflective_letters_type,
+      json_extract(payload,'$.contextReceipt.workSourceBindings') AS work_bindings,
+      json_type(payload,'$.contextReceipt.workSourceBindings') AS work_bindings_type,
+      json_extract(payload,'$.contextReceipt.assistantWorkSources') AS assistant_works,
+      json_type(payload,'$.contextReceipt.assistantWorkSources') AS assistant_works_type,
+      json_extract(payload,'$.contextReceipt.assistantTextSources') AS assistant_texts,
+      json_type(payload,'$.contextReceipt.assistantTextSources') AS assistant_texts_type,
+      json_extract(payload,'$.contextReceipt.personalMethodSources') AS personal_methods,
+      json_type(payload,'$.contextReceipt.personalMethodSources') AS personal_methods_type,
+      json_extract(payload,'$.contextReceipt.campusSensitiveReads') AS campus_sensitive,
+      json_type(payload,'$.contextReceipt.campusSensitiveReads') AS campus_sensitive_type,
+      json_type(payload,'$.contextReceipt.campusReadingAddresses') AS campus_reading_type,
+      json_extract(payload,'$.contextReceipt.campusReadingSources') AS campus_reading_sources,
+      json_type(payload,'$.contextReceipt.campusReadingSources') AS campus_reading_sources_type,
+      json_extract(payload,'$.contextReceipt.campusReadingIncomplete') AS campus_reading_incomplete,
+      (SELECT json_group_array(json_extract(address.value,'$.snapshot'))
+        FROM json_each(json_extract(messages.payload,'$.contextReceipt.campusReadingAddresses')) address) AS campus_reading_proofs,
+      json_extract(payload,'$.contextReceipt.toolAttempts') AS tool_attempts,
+      json_extract(payload,'$.contextReceipt.noteSources') AS note_sources,
+      json_type(payload,'$.contextReceipt.noteSources') AS note_sources_type,
+      json_extract(payload,'$.contextReceipt.interactiveProgramSources') AS interactive_programs,
+      json_type(payload,'$.contextReceipt.interactiveProgramSources') AS interactive_programs_type
+      FROM messages WHERE session_id=? AND role='assistant' ${selected ? 'AND id IN (SELECT value FROM json_each(?))' : ''}`)
+      .all(sessionId, ...(selected ? [selected] : []));
+    // Permission metadata must not select whole stories, teaching bodies,
+    // discussion prose or view comparisons before their own source gate.
+    const projection = `m.id AS message_id,json_extract(s.value,'$.id') AS scene_id,
+      json_extract(s.value,'$.revision') AS revision,json_extract(s.value,'$.kind') AS kind,
+      json_extract(s.value,'$.proof') AS note_proof,
+      json_extract(s.value,'$.source.sourceId') AS source_id,json_extract(s.value,'$.continuation') AS continuation,
+      json_extract(s.value,'$.provenance.sourceBinding') AS binding,
+      json_extract(s.value,'$.sessionId') AS scene_session_id,json_extract(s.value,'$.createdAt') AS scene_created_at,
+      json_extract(s.value,'$.matter.id') AS matter_id,json_extract(s.value,'$.matter.revision') AS matter_revision,
+      json_extract(s.value,'$.matter.needsReview') AS matter_review,json_extract(s.value,'$.modules') AS modules,
+      (SELECT json_group_array(json_object('id',json_extract(c.value,'$.id'),'revision',json_extract(c.value,'$.revision'),
+        'matterId',json_extract(c.value,'$.matterId'),'matterRevision',json_extract(c.value,'$.matterRevision'),
+        'snapshotProof',json_extract(c.value,'$.snapshotProof'))) FROM json_each(s.value,'$.coWork') c) AS co_work,
+      json_type(s.value,'$.provenance.assistantWorkSources') AS chapters_type,
+      json_extract(s.value,'$.provenance.assistantWorkSources') AS chapters,
+      json_type(s.value,'$.storySetting') AS setting_type,
+      json_extract(s.value,'$.storySetting.sourceBinding') AS setting_binding,
+      json_type(s.value,'$.storySetting.noteSources') AS setting_notes_type,
+      json_extract(s.value,'$.storySetting.noteSources') AS setting_notes,
+      json_type(s.value,'$.storySetting.assistantWorkSources') AS setting_chapters_type,
+      json_extract(s.value,'$.storySetting.assistantWorkSources') AS setting_chapters`;
+    const sceneRows = this.db.prepare(`SELECT ${projection} FROM messages m,json_each(m.payload,'$.scenes') s
+      WHERE m.session_id=? AND m.role='assistant' ${selected ? 'AND m.id IN (SELECT value FROM json_each(?))' : ''}`)
+      .all(sessionId, ...(selected ? [selected] : []));
+    const json = (value: unknown) => value === null ? null : JSON.parse(String(value));
+    const sceneValue = (row: Row) => ({ id: row.scene_id, revision: row.revision, kind: row.kind, sourceMessageId: row.message_id, source: { sourceId: row.source_id },
+      ...(row.kind === 'note' ? { proof: json(row.note_proof) } : {}),
+      ...(row.kind === 'planning' ? { continuation: json(row.continuation) } : {}),
+      ...(row.kind === 'discussion' ? { sessionId: row.scene_session_id, createdAt: row.scene_created_at,
+        matter: { id: row.matter_id, revision: row.matter_revision, needsReview: row.matter_review === 1 },
+        provenance: { sourceBinding: json(row.binding) }, modules: json(row.modules),
+        coWork: (json(row.co_work) || []).map((header: any) => ({ ...header, snapshotProof: header.snapshotProof ?? undefined })) } : {}),
+      ...(row.kind === 'curiosity' ? { provenance: { sourceBinding: json(row.binding),
+        ...(row.chapters_type === null ? {} : { assistantWorkSources: json(row.chapters) }) } } : {}),
+      ...(row.kind === 'map' && row.setting_type !== null ? { storySetting: { sourceBinding: json(row.setting_binding),
+        ...(row.setting_notes_type === null ? {} : { noteSources: json(row.setting_notes) }),
+        ...(row.setting_chapters_type === null ? {} : { assistantWorkSources: json(row.setting_chapters) }) } } : {}) });
+    const snapshots = new Map<string, any>(sceneRows.map(row => [`${row.scene_id}@${row.revision}`, sceneValue(row)]));
+    const attached = new Map<string, any[]>();
+    for (const row of sceneRows) attached.set(String(row.message_id), [...(attached.get(String(row.message_id)) || []), sceneValue(row)]);
+    const references = this.db.prepare(`SELECT m.id AS message_id,json_extract(ref.value,'$.id') AS scene_id,
+      json_extract(ref.value,'$.revision') AS revision FROM messages m,json_each(m.payload,'$.views') v,json_each(v.value,'$.sceneRefs') ref
+      WHERE m.session_id=? AND m.role='assistant' ${selected ? 'AND m.id IN (SELECT value FROM json_each(?))' : ''}`)
+      .all(sessionId, ...(selected ? [selected] : []));
+    for (const ref of references) {
+      const key = `${ref.scene_id}@${ref.revision}`;
+      if (!snapshots.has(key)) {
+        const row = this.db.prepare(`SELECT ${projection} FROM messages m,json_each(m.payload,'$.scenes') s
+          WHERE m.session_id=? AND m.role='assistant' AND json_extract(s.value,'$.id')=? AND json_extract(s.value,'$.revision')=?
+          ORDER BY m.rowid DESC LIMIT 1`).get(sessionId, ref.scene_id as SQLInputValue, ref.revision as SQLInputValue);
+        if (row) snapshots.set(key, sceneValue(row));
+      }
+      if (snapshots.has(key)) attached.set(String(ref.message_id), [...(attached.get(String(ref.message_id)) || []), snapshots.get(key)]);
+    }
+    const workBindings = (row: Row): unknown => {
+      try { return JSON.parse(String(row.work_bindings)); }
+      catch (error) { if (error instanceof SyntaxError) return null; throw error; }
+    };
+    return candidates.map(row => ({ id: String(row.id), value: {
+        ...(row.releases_type === null ? {} : { releaseArtifacts: row.releases_type === 'array' ? JSON.parse(String(row.release_headers)) : null }),
+        legacyRelease: row.legacy_release === 1,
+        contextReceipt: {
+          ...(row.receipt_id === null ? {} : { id: row.receipt_id }),
+          ...(row.receipt_epoch === null ? {} : { privacyEpoch: row.receipt_epoch }),
+          ...(row.release_sources_type === null ? {} : { releaseSources: JSON.parse(String(row.release_sources)) }),
+          ...(row.material_navigation_type === null ? {} : { materialNavigationSources: row.material_navigation_type === 'array'
+            ? JSON.parse(String(row.material_navigation)) : null }),
+          ...(row.spatial_sources_type === null ? {} : { spatialSources: row.spatial_sources_type === 'array'
+            ? JSON.parse(String(row.spatial_sources)) : null }),
+          ...(row.workout_sources_type === null ? {} : { workoutSources: row.workout_sources_type === 'array'
+            ? JSON.parse(String(row.workout_sources)) : null }),
+          ...(row.evidence_ids === null ? {} : { providedEvidenceIds: JSON.parse(String(row.evidence_ids)) }),
+          ...(row.provided_sources === null ? {} : { providedSourceIds: JSON.parse(String(row.provided_sources)) }),
+          ...(row.object_versions === null ? {} : { providedObjectVersions: JSON.parse(String(row.object_versions)) }),
+          imageRequests: JSON.parse(String(row.image_requests)),
+          ...(row.provenance === null ? {} : { planningProvenance: JSON.parse(String(row.provenance)) }),
+          ...(row.historical === null ? {} : { historicalAssertionVersions: JSON.parse(String(row.historical)) }),
+          ...(row.learning === null ? {} : { learningProcessVersions: JSON.parse(String(row.learning)) }),
+          ...(row.reflective_letters_type === null ? {} : { reflectiveLetterSources: JSON.parse(String(row.reflective_letters)) }),
+          ...(row.work_bindings_type === null ? {} : { workSourceBindings: workBindings(row) }),
+          ...(row.assistant_works_type === null ? {} : { assistantWorkSources: JSON.parse(String(row.assistant_works)) }),
+          ...(row.assistant_texts_type === null ? {} : { assistantTextSources: JSON.parse(String(row.assistant_texts)) }),
+          ...(row.personal_methods_type === null ? {} : { personalMethodSources: JSON.parse(String(row.personal_methods)) }),
+          ...(row.campus_sensitive_type === null ? {} : { campusSensitiveReads: JSON.parse(String(row.campus_sensitive)) }),
+          ...(row.campus_reading_type === null ? {} : { campusReadingProofs: row.campus_reading_type === 'array' ? JSON.parse(String(row.campus_reading_proofs)) : null }),
+          ...(row.campus_reading_sources_type === null ? {} : { campusReadingSources: JSON.parse(String(row.campus_reading_sources)) }),
+          ...(row.campus_reading_incomplete === null ? {} : { campusReadingIncomplete: row.campus_reading_incomplete }),
+          ...(row.tool_attempts === null ? {} : { toolAttempts: JSON.parse(String(row.tool_attempts)) }),
+          ...(row.note_sources_type === null ? {} : { noteSources: JSON.parse(String(row.note_sources)) }),
+          ...(row.interactive_programs_type === null ? {} : { interactiveProgramSources: JSON.parse(String(row.interactive_programs)) }),
+        },
+        scenes: attached.get(String(row.id)) || [],
+      } }));
+  }
+  /** Source metadata of one original message, without selecting its body. */
+  messageSourceMetadata(sessionId: string, messageId: string) {
+    return this.conversationPlanningMetadata(sessionId, new Set([messageId]))[0]?.value;
+  }
+  /** Only messages whose actual text was supplied contribute draft addresses.
+   * A directory entry alone does not call this adoption path. */
+  conversationReleaseSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): ReleaseSource[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || !messageIds.length) return [];
+    const sources: ReleaseSource[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId, new Set(messageIds))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('release_source_changed', "A source in this draft's context changed. Its old body was not reused.");
+      const heads = new Map<string, { id: string; revision: number }>();
+      for (const header of Array.isArray(row.value.releaseArtifacts) ? row.value.releaseArtifacts : [])
+        if (!heads.has(header.id) || heads.get(header.id)!.revision < header.revision) heads.set(header.id, header);
+      if (heads.size) sources.push(...[...heads.values()].map(header => ({ sessionId, messageId: row.id, artifactId: header.id, revision: header.revision })));
+      else if (Array.isArray(row.value.contextReceipt.releaseSources)) sources.push(...row.value.contextReceipt.releaseSources);
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  /** Carry only the provenance of the historical bodies actually provided. */
+  conversationWorkSourceBindings(handle: ScopeHandle, sessionId: string, messageIds: string[]): WorkSourceBinding[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const selected = new Set(messageIds), bindings: WorkSourceBinding[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId).filter(row => selected.has(row.id))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('history_changed', "The context just read changed. Read it again.");
+      const raw = row.value.contextReceipt.workSourceBindings;
+      if (Array.isArray(raw)) bindings.push(...raw.map(binding => workSourceBindingSchema.parse(binding)));
+    }
+    return [...new Map(bindings.map(binding => [canonical(binding), binding])).values()];
+  }
+  conversationPlanningProvenance(handle: ScopeHandle, sessionId: string, messageIds: string[]): PlanningMaterialProvenance[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || scope.audience !== 'self' || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const selected = new Set(messageIds), provenance: PlanningMaterialProvenance[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId).filter(row => selected.has(row.id))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('history_changed', "The context just read changed. Read it again.");
+      provenance.push(...row.value.contextReceipt?.planningProvenance || []);
+      for (const scene of row.value.scenes) if (scene?.kind === 'planning' && scene.continuation) {
+        const value = scene.continuation;
+        provenance.push(planningMaterialProvenanceSchema.parse({ intentId: value.intentId, intentRevision: value.intentRevision,
+          sourceBinding: value.sourceBinding, attemptBasis: value.attemptBasis }));
+      }
+    }
+    return [...new Map(provenance.map(value => [canonical(value), value])).values()];
+  }
+  /** A derived reply keeps the exact historical versions whose bodies it used. */
+  conversationHistoricalAssertionVersions(handle: ScopeHandle, sessionId: string, messageIds: string[]): { id: string; revision: number }[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const selected = new Set(messageIds), refs: { id: string; revision: number }[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId).filter(row => selected.has(row.id))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('history_changed', "The context just read changed. Read it again.");
+      refs.push(...row.value.contextReceipt.historicalAssertionVersions || []);
+    }
+    return [...new Map(refs.map(ref => [ref.id + ':' + ref.revision, ref])).values()];
+  }
+  conversationLearningProcessVersions(handle: ScopeHandle, sessionId: string, messageIds: string[]): { id: string; revision: number }[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const selected = new Set(messageIds), refs: { id: string; revision: number }[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId).filter(row => selected.has(row.id))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('history_changed', "The context just read changed. Read it again.");
+      // A lawful old co-work proof carries its former learning sources as
+      // history, never as the present process version or a mastery claim.
+      refs.push(...(row.value.contextReceipt.learningProcessVersions || []).filter((ref: { id: string; revision: number }) => this.learningProcessReadable(handle, ref.id, ref.revision)));
+    }
+    return [...new Map(refs.map(ref => [ref.id + ':' + ref.revision, ref])).values()];
+  }
+  conversationReflectiveLetterSources(handle: ScopeHandle, sessionId: string, messageIds: string[] = []): ReflectiveLetterMetadata[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const selected = new Set(messageIds), sources: ReflectiveLetterMetadata[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId).filter(row => selected.has(row.id))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('history_changed', "The context just read changed. Read it again.");
+      const raw = row.value.contextReceipt.reflectiveLetterSources;
+      if (Array.isArray(raw)) sources.push(...raw.map(value => reflectiveLetterMetadataSchema.parse(value)));
+    }
+    return [...new Map(sources.map(value => [canonical(value), value])).values()];
+  }
+  conversationAssistantWorkSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): AssistantWorkSource[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const selected = new Set(messageIds), sources: AssistantWorkSource[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId).filter(row => selected.has(row.id))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('history_changed', "The work context changed. Return to the original chapter and read again.");
+      const raw = row.value.contextReceipt.assistantWorkSources;
+      if (Array.isArray(raw)) sources.push(...raw.map(value => assistantWorkSourceSchema.parse(value)));
+      for (const scene of row.value.scenes) if (scene?.kind === 'curiosity' && Array.isArray(scene.provenance?.assistantWorkSources))
+        sources.push(...scene.provenance.assistantWorkSources.map((value: unknown) => assistantWorkSourceSchema.parse(value)));
+      for (const scene of row.value.scenes) if (scene?.kind === 'discussion' && Array.isArray(scene.coWork) && scene.coWork.length
+        && scene.coWork.every((projection: CompanionSceneProjection) => !!projection.snapshotProof))
+        sources.push(assistantWorkSourceSchema.parse({ messageId: scene.sourceMessageId || row.id, sceneId: scene.id, sceneRevision: scene.revision }));
+    }
+    return [...new Map(sources.map(value => [canonical(value), value])).values()];
+  }
+  conversationInteractiveProgramSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): InteractiveProgramSource[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const sources: InteractiveProgramSource[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId, new Set(messageIds))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('interactive_program_source_changed', "The interactive context changed. Reconnect to the currently permitted original work.");
+      const raw = row.value.contextReceipt.interactiveProgramSources;
+      if (Array.isArray(raw)) sources.push(...raw.map(value => interactiveProgramSourceSchema.parse(value)));
+    }
+    return [...new Map(sources.map(value => [canonical(value), value])).values()];
+  }
+  private spatialOwnerScope(handle: ScopeHandle) {
+    const scope = this.scope(handle);
+    return scope.principalId === this.identity.principalId && scope.workspaceId === this.identity.workspaceId
+      && scope.subjectId === scope.principalId && scope.worldId === 'real' && scope.audience === 'self'
+      && scope.sources.includes('work:self') && scope.grants.includes('map:read') && scope.grants.includes('evidence:read')
+      && !this.hasFence('work:self') ? scope : undefined;
+  }
+  private spatialVersionMetadata(raw: unknown): SpatialBindingVersionMetadata | undefined {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    const value = raw as Record<string, unknown>;
+    if (Object.keys(value).some(key => !['revision', 'type', 'placeId', 'evidenceIds', 'spatialBinding', 'range'].includes(key))
+      || !Number.isSafeInteger(value.revision) || Number(value.revision) < 1
+      || typeof value.type !== 'string' || !['spatial_role', 'spatial_alias', 'spatial_crosswalk'].includes(value.type)
+      || value.placeId !== undefined && (typeof value.placeId !== 'string' || !value.placeId || value.placeId.length > 160)
+      || !Array.isArray(value.evidenceIds) || !value.evidenceIds.length || value.evidenceIds.length > 32
+      || value.evidenceIds.some(id => typeof id !== 'string' || !id || id.length > 160)) return;
+    if (value.spatialBinding !== undefined) {
+      const binding = spatialBindingSchema.safeParse(value.spatialBinding);
+      if (!binding.success || value.range !== undefined
+        || canonical([...new Set(value.evidenceIds)]) !== canonical([binding.data.basis.eventId])) return;
+      return { revision: Number(value.revision), type: value.type, evidenceIds: value.evidenceIds as string[],
+        ...(value.placeId ? { placeId: value.placeId as string } : {}), spatialBinding: binding.data };
+    }
+    if (value.range !== 'unknown') return;
+    return { revision: Number(value.revision), type: value.type, evidenceIds: value.evidenceIds as string[],
+      ...(value.placeId ? { placeId: value.placeId as string } : {}), range: 'unknown' };
+  }
+  private spatialVersionFromRecord(record: WorkRecord): SpatialBindingVersionMetadata | undefined {
+    return this.spatialVersionMetadata({ revision: record.revision, type: record.data.type, evidenceIds: record.evidenceIds,
+      ...(record.data.placeId === undefined ? {} : { placeId: record.data.placeId }),
+      ...(record.data.spatialBinding === undefined ? { range: 'unknown' } : { spatialBinding: record.data.spatialBinding }) });
+  }
+  /** Accepted place configuration is business metadata. Its old request is
+   * checked below, without making that conversation readable in this scope. */
+  spatialBindingRecords(handle: ScopeHandle, id?: string, includeInactive = false): WorkRecord[] {
+    if (!this.spatialOwnerScope(handle)) return [];
+    const f = this.filter(handle);
+    const rows = this.db.prepare(`SELECT r.id,r.owner,r.workspace,r.subject,r.world,r.kind,r.revision,r.status,r.title,
+      r.purpose,r.audience,r.sensitivity,r.retain,r.infer,r.expires_at,
+      json_extract(r.payload,'$.evidenceIds') AS evidence_ids,
+      json_type(r.payload,'$.data.spatialBinding') AS binding_type,
+      json_object('type',json_extract(r.payload,'$.data.type'),'role',json_extract(r.payload,'$.data.role'),
+        'alias',json_extract(r.payload,'$.data.alias'),'placeId',json_extract(r.payload,'$.data.placeId'),
+        'referenceId',json_extract(r.payload,'$.data.referenceId'),'referenceNamespace',json_extract(r.payload,'$.data.referenceNamespace'),
+        'namespace',json_extract(r.payload,'$.data.namespace'),'mapVersion',json_extract(r.payload,'$.data.mapVersion'),
+        'spatialBinding',json_extract(r.payload,'$.data.spatialBinding'),'publicDataChanged',json_extract(r.payload,'$.data.publicDataChanged')) AS data
+      FROM h_work r WHERE ${f.sql} AND json_extract(r.payload,'$.data.type') IN ('spatial_role','spatial_alias','spatial_crosswalk')
+      ${includeInactive && id ? '' : "AND r.status='active'"} ${id ? 'AND r.id=?' : ''} ORDER BY r.rowid DESC`)
+      .all(...f.params, ...(id ? [id] : []));
+    return rows.filter(row => !this.hasFence(String(row.id), 'work:self')).map(row => ({
+      id: String(row.id), ownerId: String(row.owner), workspaceId: String(row.workspace), subjectId: String(row.subject), worldId: String(row.world),
+      kind: row.kind as WorkRecord['kind'], revision: Number(row.revision), status: String(row.status), title: String(row.title),
+      evidenceIds: JSON.parse(String(row.evidence_ids || '[]')) as string[],
+      label: { purpose: String(row.purpose), audience: row.audience as WorkRecord['label']['audience'],
+        sensitivity: row.sensitivity as WorkRecord['label']['sensitivity'], retention: row.retain as WorkRecord['label']['retention'],
+        infer: !!row.infer, ...(row.expires_at ? { expiresAt: String(row.expires_at) } : {}) },
+      data: Object.fromEntries(Object.entries(JSON.parse(String(row.data)) as WorkRecord['data'])
+        .filter(([key, value]) => value !== null || key === 'spatialBinding' && row.binding_type !== null)
+        .map(([key, value]) => [key, key === 'publicDataChanged' && typeof value === 'number' ? !!value : value])),
+    }));
+  }
+  /** Frozen business metadata belongs to this exact configuration owner. A
+   * later binding cannot sign for an older route's endpoint or request. */
+  spatialBindingVersion(handle: ScopeHandle, id: string, revision: number): WorkRecord | undefined {
+    if (!Number.isSafeInteger(revision) || revision < 1) return;
+    const record = this.spatialBindingRecords(handle, id, true)[0];
+    if (!record) return;
+    const row = this.db.prepare(`SELECT json_extract(payload,'$.data.spatialBindingVersions') AS versions,
+      json_extract(payload,'$.data.requiresRebuild') AS rebuild FROM h_work WHERE id=? AND owner=? AND workspace=?`)
+      .get(id, record.ownerId, record.workspaceId);
+    if (!row) return;
+    if (record.revision === revision) return row.rebuild === 1 ? undefined : record;
+    let versions: unknown;
+    try { versions = row.versions === null ? [] : JSON.parse(String(row.versions)); }
+    catch (error) { if (error instanceof SyntaxError) return; throw error; }
+    if (!Array.isArray(versions)) return;
+    const matches = versions.map(value => this.spatialVersionMetadata(value)).filter(value => value?.revision === revision);
+    if (matches.length !== 1 || !matches[0]) return;
+    const version = matches[0];
+    return { ...record, revision, status: 'historical', title: '', evidenceIds: version.evidenceIds,
+      data: { type: version.type, ...(version.placeId ? { placeId: version.placeId } : {}),
+        ...(version.spatialBinding ? { spatialBinding: version.spatialBinding } : {}) } };
+  }
+  /** A coordinate-only lifecycle check. Ordinary history and inference choices
+   * do not revoke an accepted configuration; deletion and source withdrawal do. */
+  private spatialBasisAddressesCurrent(handle: ScopeHandle, refs: { eventId: string; contentVersion?: number; start?: number; end?: number }[], historicalSnapshot = false): boolean {
+    const scope = this.spatialOwnerScope(handle);
+    if (!scope || !refs.length || refs.length > 32) return false;
+    const fences = this.fences().filter(fence => fence.kind === 'delete');
+    try {
+      for (const ref of refs) {
+        const row = this.db.prepare(`SELECT id,source,version,status,expires_at,length(content) AS text_length,
+          json_extract(payload,'$.roots') AS roots,json_extract(payload,'$.parentEventId') AS parent,
+          json_extract(payload,'$.locator') AS locator FROM h_evidence
+          WHERE id=? AND owner=? AND workspace=? AND subject=? AND world='real'`)
+          .get(ref.eventId, scope.principalId, scope.workspaceId, scope.principalId);
+        if (!row || row.status === 'deleted' || ref.contentVersion !== undefined && row.version !== ref.contentVersion
+          || row.expires_at !== null && (!Number.isFinite(Date.parse(String(row.expires_at))) || Date.parse(String(row.expires_at)) <= Date.parse(this.clock.now()))) return false;
+        const roots: unknown = JSON.parse(String(row.roots || '[]'));
+        if (!Array.isArray(roots) || roots.some(root => typeof root !== 'string')) return false;
+        const source: LineageSource = { id: ref.eventId, sourceId: String(row.source), ownerId: scope.principalId, workspaceId: scope.workspaceId,
+          contentVersion: Number(row.version), roots, textLength: Number(row.text_length),
+          ...(row.parent ? { parentEventId: String(row.parent) } : {}),
+          ...(row.locator ? { locator: evidenceSchema.shape.locator.parse(JSON.parse(String(row.locator))) } : {}) };
+        const located = ref.contentVersion !== undefined && ref.start !== undefined && ref.end !== undefined;
+        if (located && (!Number.isSafeInteger(ref.start) || !Number.isSafeInteger(ref.end) || ref.start! < 0
+          || ref.end! <= ref.start! || ref.end! > source.textLength!)) return false;
+        const lineage = this.sourceOrigins(source, located ? { start: ref.start!, end: ref.end! } : undefined);
+        if (located && !lineage.complete) return false;
+        for (const origin of lineage.spans) {
+          if (!origin.sourceId || origin.contentVersion === undefined || this.hasFence(origin.eventId, origin.sourceId)) return false;
+          const current = this.db.prepare(`SELECT source,version,status,expires_at FROM h_evidence
+            WHERE id=? AND owner=? AND workspace=? AND subject=? AND world='real'`)
+            .get(origin.eventId, scope.principalId, scope.workspaceId, scope.principalId);
+          if (!current || current.status === 'deleted' || current.version !== origin.contentVersion || current.source !== origin.sourceId
+            || current.expires_at !== null && (!Number.isFinite(Date.parse(String(current.expires_at))) || Date.parse(String(current.expires_at)) <= Date.parse(this.clock.now()))) return false;
+          const known = origin.start !== undefined && origin.end !== undefined;
+          if (fences.some(fence => (fence.spans || []).some(cut => cut.eventId === origin.eventId
+            && (!known || cut.contentVersion !== origin.contentVersion || cut.start < origin.end! && cut.end > origin.start!)))) return false;
+          if (this.sourceSpanRestrictions(origin).some(restriction => {
+            // A later correction of meaning does not erase a real earlier
+            // accepted comparison. It cannot restore current truth or undo
+            // an authorization withdrawal, whole-source stop, or deletion.
+            if (restriction.predicate === '*' || restriction.operation === 'AUTHORIZATION_RETRACT'
+              || restriction.content_version !== null && restriction.content_version !== origin.contentVersion) return true;
+            if (restriction.operation === 'DEACTIVATE') return false;
+            return !historicalSnapshot || !['RETRACT', 'CORRECT', 'REFINE', 'SUPERSEDE', 'EXPIRE'].includes(String(restriction.operation));
+          })) return false;
+        }
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof HarnessError || error instanceof SyntaxError || error instanceof Error && error.name === 'ZodError') return false;
+      throw error;
+    }
+  }
+  spatialBindingBasisCurrent(handle: ScopeHandle, workId: string, revision: number): boolean {
+    const record = this.spatialBindingVersion(handle, workId, revision);
+    if (!record || record.revision !== revision) return false;
+    if (record.data.spatialBinding !== undefined) {
+      const binding = spatialBindingSchema.safeParse(record.data.spatialBinding);
+      const current = record.status === 'historical' ? this.spatialBindingRecords(handle, workId, true)[0] : undefined;
+      const historicalSnapshot = record.status === 'historical' && !!current && current.revision > revision;
+      return binding.success && canonical([...new Set(record.evidenceIds)]) === canonical([binding.data.basis.eventId])
+        && this.spatialBasisAddressesCurrent(handle, [binding.data.basis], historicalSnapshot);
+    }
+    // Old configurations have no proven fragment. A local deletion or stop
+    // cannot be excluded by guessing a quote, version, or profile identity.
+    return this.spatialBasisAddressesCurrent(handle, record.evidenceIds.map(eventId => ({ eventId })));
+  }
+  /** Changing a place correspondence does not cancel an independent goal
+   * supported by a lawful historical comparison. This preserves state only;
+   * reading its text or using a personal point still has its ordinary gates. */
+  spatialBindingGoalsToPreserve(handle: ScopeHandle, bindingId: string): ReadonlySet<string> {
+    const preserved = new Set<string>();
+    if (!this.spatialOwnerScope(handle) || !this.spatialBindingRecords(handle, bindingId, true).length) return preserved;
+    const f = this.filter(handle);
+    for (const row of this.db.prepare(`SELECT r.id,json_extract(r.payload,'$.data.spatialSources') AS sources
+      FROM h_work r WHERE ${f.sql} AND r.kind='goal' AND json_type(r.payload,'$.data.spatialSources')='array'`)
+      .all(...f.params)) {
+      let raw: unknown;
+      try { raw = JSON.parse(String(row.sources)); }
+      catch (error) { if (error instanceof SyntaxError) continue; throw error; }
+      const parsed = spatialSourceProofSchema.array().max(256).safeParse(raw);
+      if (!parsed.success) continue;
+      const versions = parsed.data.flatMap(proof => proof.origin.kind === 'binding' && proof.origin.id === bindingId
+        ? [proof.origin.revision] : []);
+      if (versions.length && [...new Set(versions)].every(revision => this.spatialBindingBasisCurrent(handle, bindingId, revision))
+        && !this.hasFence(String(row.id), 'work:self')) preserved.add(String(row.id));
+    }
+    return preserved;
+  }
+  spatialSourcesReadable(handle: ScopeHandle, raw: unknown): boolean {
+    this.scope(handle);
+    if (raw === undefined) return true;
+    const parsed = spatialSourceProofSchema.array().max(256).safeParse(raw);
+    if (!parsed.success) return false;
+    if (!parsed.data.length) return true;
+    try { return this.verifySpatialSources?.(handle, parsed.data) === true; }
+    catch (error) { if (error instanceof HarnessError) return false; throw error; }
+  }
+  workSpatialSources(handle: ScopeHandle, records: Pick<WorkRecord, 'id' | 'revision'>[]): SpatialSourceProof[] {
+    const scope = this.scope(handle), sources: SpatialSourceProof[] = [];
+    for (const record of records) {
+      const row = this.db.prepare(`SELECT revision,json_type(payload,'$.data.spatialSources') AS sources_type,
+        json_extract(payload,'$.data.spatialSources') AS sources FROM h_work WHERE id=? AND owner=? AND workspace=?`)
+        .get(record.id, scope.principalId, scope.workspaceId);
+      if (!row || row.revision !== record.revision) throw new HarnessError('spatial_source_changed', "The matter just read changed.");
+      if (row.sources_type === null) continue;
+      const raw: unknown = row.sources_type === 'array' ? JSON.parse(String(row.sources)) : null;
+      if (!this.spatialSourcesReadable(handle, raw)) throw new HarnessError('spatial_source_changed', "This matter's place basis changed.");
+      sources.push(...spatialSourceProofSchema.array().parse(raw));
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  conversationSpatialSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): SpatialSourceProof[] {
+    const scope = this.scope(handle), sources: SpatialSourceProof[] = [];
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    for (const row of this.conversationPlanningMetadata(sessionId, new Set(messageIds))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('spatial_source_changed', "A place basis in the context just read changed.");
+      if (row.value.contextReceipt.spatialSources !== undefined)
+        sources.push(...spatialSourceProofSchema.array().parse(row.value.contextReceipt.spatialSources));
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  workoutSourcesReadable(handle: ScopeHandle, raw: unknown): boolean {
+    if (raw === undefined) return true;
+    const parsed = workoutSourceProofSchema.array().max(256).safeParse(raw);
+    if (!parsed.success) return false;
+    if (!parsed.data.length) return true;
+    const scope = this.scope(handle);
+    if (scope.principalId !== this.identity.principalId || scope.workspaceId !== this.identity.workspaceId
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || !scope.sources.includes('workout:self') || !scope.grants.includes('evidence:read')) return false;
+    // A later sample or pause does not erase an independently legal observation.
+    return parsed.data.every(proof => !this.hasFence(workoutSourceObjectId(proof.workoutId), 'workout:self'));
+  }
+  workWorkoutSources(handle: ScopeHandle, records: Pick<WorkRecord, 'id' | 'revision'>[]): WorkoutSourceProof[] {
+    const scope = this.scope(handle), sources: WorkoutSourceProof[] = [];
+    for (const record of records) {
+      const row = this.db.prepare(`SELECT revision,json_extract(payload,'$.data.workoutSources') AS sources
+        FROM h_work WHERE id=? AND owner=? AND workspace=?`)
+        .get(record.id, scope.principalId, scope.workspaceId);
+      if (!row || row.sources === null) continue;
+      if (row.revision !== record.revision) throw new HarnessError('work_source_changed', "That material changed. Reconnect to its current revision.");
+      const raw: unknown = typeof row.sources === 'string' ? JSON.parse(row.sources) : row.sources;
+      if (!this.workoutSourcesReadable(handle, raw)) throw new HarnessError('workout_source_changed', "The activity record used by this material was cancelled. Return to currently retained content.");
+      sources.push(...workoutSourceProofSchema.array().parse(raw));
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  conversationWorkoutSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): WorkoutSourceProof[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const sources: WorkoutSourceProof[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId, new Set(messageIds))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('workout_source_changed', "The context used a cancelled activity record and was not continued.");
+      if (row.value.contextReceipt.workoutSources !== undefined)
+        sources.push(...workoutSourceProofSchema.array().parse(row.value.contextReceipt.workoutSources));
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  /** Only notebook ownership, state, hash and Unicode length metadata leave this query. */
+  noteSourcesReadable(handle: ScopeHandle, raw: unknown): boolean {
+    if (!Array.isArray(raw) || raw.length > 256) return false;
+    if (!raw.length) return true;
+    const scope = this.scope(handle);
+    if (scope.principalId !== this.identity.principalId || scope.workspaceId !== this.identity.workspaceId
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || !scope.sources.includes('notes:self') || !scope.grants.includes('evidence:read') || this.hasFence('notes:self')) return false;
+    if (this.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('h_notes','h_note_versions')").get()?.n !== 2) return false;
+    for (const value of raw) {
+      const parsed = noteSourceProofSchema.safeParse(value);
+      if (!parsed.success) return false;
+      const proof = parsed.data;
+      if (this.hasFence(proof.id, 'notes:self')) return false;
+      const row = this.db.prepare(`SELECT n.state,json_extract(v.payload,'$.sha256') AS hash,
+        json_extract(v.payload,'$.ownerId') AS owner,json_extract(v.payload,'$.workspaceId') AS workspace,
+        note_codepoint_length(json_extract(v.payload,'$.body')) AS body_length
+        FROM h_notes n JOIN h_note_versions v ON v.note_id=n.id AND v.revision=?
+        WHERE n.id=? AND n.owner=? AND n.workspace=?`)
+        .get(proof.revision, proof.id, scope.principalId, scope.workspaceId);
+      if (!row || row.state !== 'active' || row.owner !== scope.principalId || row.workspace !== scope.workspaceId
+        || row.hash !== proof.sha256 || typeof row.body_length !== 'number' || proof.end > row.body_length) return false;
+    }
+    return true;
+  }
+  /** Exact Work versions can carry words derived from an earlier notebook
+   * read. Inherit their original addresses, without rereading or copying a
+   * notebook body or treating the derived material as a fresh original read. */
+  workNoteSources(handle: ScopeHandle, records: Pick<WorkRecord, 'id' | 'revision'>[]): NoteSourceProof[] {
+    const scope = this.scope(handle), sources: NoteSourceProof[] = [];
+    for (const record of records) {
+      const row = this.db.prepare(`SELECT revision,json_extract(payload,'$.data.noteSources') AS sources
+        FROM h_work WHERE id=? AND owner=? AND workspace=?`)
+        .get(record.id, scope.principalId, scope.workspaceId);
+      if (!row || row.sources === null) continue;
+      if (row.revision !== record.revision) throw new HarnessError('work_source_changed', "That material changed. Reconnect to its current revision.");
+      const raw: unknown = typeof row.sources === 'string' ? JSON.parse(row.sources) : row.sources;
+      if (!this.noteSourcesReadable(handle, raw))
+        throw new HarnessError('note_source_changed', "The note referenced by this material is unreadable now.");
+      sources.push(...(raw as unknown[]).map(value => noteSourceProofSchema.parse(value)));
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  conversationNoteSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): NoteSourceProof[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const sources: NoteSourceProof[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId, new Set(messageIds))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('note_source_changed', "A note in the context is unavailable. Return to currently permitted originals.");
+      if (Array.isArray(row.value.contextReceipt.noteSources))
+        sources.push(...row.value.contextReceipt.noteSources.map(value => noteSourceProofSchema.parse(value)));
+      for (const scene of row.value.scenes) if (scene.kind === 'note') sources.push(noteSourceProofSchema.parse(scene.proof));
+      for (const scene of row.value.scenes) if (scene.kind === 'curiosity' && scene.provenance?.noteSources !== undefined)
+        sources.push(...scene.provenance.noteSources.map((value: unknown) => noteSourceProofSchema.parse(value)));
+      for (const scene of row.value.scenes) if (scene.kind === 'map' && scene.storySetting)
+        sources.push(...scene.storySetting.noteSources.map((value: unknown) => noteSourceProofSchema.parse(value)));
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  /** Rehash the original user-owned pixels locally; metadata is not enough
+   * to establish that an unchanged event still owns the same stored image. */
+  imageSourceVersionsReadable(handle: ScopeHandle, raw: unknown): boolean {
+    this.scope(handle);
+    if (!Array.isArray(raw)) return false;
+    try {
+      for (const ref of raw) {
+        if (!ref || typeof ref !== 'object' || ref.imageSha256 === undefined) continue;
+        if (ref.kind !== 'evidence' || typeof ref.id !== 'string' || !Number.isSafeInteger(ref.revision)
+          || typeof ref.imageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(ref.imageSha256)
+          || readEvidenceImage(this, handle, ref.id, ref.revision).source.sha256 !== ref.imageSha256) return false;
+      }
+      return true;
+    } catch (error) { if (error instanceof HarnessError || error instanceof SyntaxError) return false; throw error; }
+  }
+  conversationImageSourceVersions(handle: ScopeHandle, sessionId: string, messageIds: string[]) {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self') return [];
+    const versions: ContextReceipt['providedObjectVersions'] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId, new Set(messageIds))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('image_changed', "The original image supporting this context changed.");
+      versions.push(...providedImageVersions(row.value.contextReceipt));
+    }
+    return providedImageVersions({ providedObjectVersions: versions });
+  }
+  conversationPersonalMethodSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): PersonalMethodSources[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const selected = new Set(messageIds), sources: PersonalMethodSources[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId).filter(row => selected.has(row.id))) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('history_changed', "This method context's basis changed. Read its currently permitted portion again.");
+      if (Array.isArray(row.value.contextReceipt.personalMethodSources))
+        sources.push(...row.value.contextReceipt.personalMethodSources.map(value => personalMethodSourcesSchema.parse(value)));
+    }
+    return [...new Map(sources.map(value => [canonical(value), value])).values()];
+  }
+  conversationCampusSensitiveReads(handle: ScopeHandle, sessionId: string, messageIds: string[]): CampusSensitiveRead[] {
+    const selected = new Set(messageIds), scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.subjectId !== scope.principalId
+      || scope.worldId !== 'real' || scope.audience !== 'self') return [];
+    const reads: CampusSensitiveRead[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId, selected)) {
+      if (!this.planningMessageReadable(handle, row.value)) throw new HarnessError('campus_history_changed', "Read this grade context again for the current purpose.");
+      const raw = row.value.contextReceipt.campusSensitiveReads;
+      if (Array.isArray(raw)) reads.push(...raw.map(value => campusSensitiveReadSchema.parse(value)));
+    }
+    return [...new Map(reads.map(read => [canonical(read), read])).values()];
+  }
+  /** Query parameters are selected only after the original message source gate;
+   * the earlier metadata projection contains snapshot proofs, never filters. */
+  conversationCampusReadingAddresses(handle: ScopeHandle, sessionId: string, messageIds: string[]) {
+    const scope = this.scope(handle), selected = new Set(messageIds);
+    if (!selected.size || !scope.sources.includes('history:self') || !scope.grants.includes('evidence:read')
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self') return [];
+    const result: { messageId: string; messageCreatedAt: string; messageOrdinal: number; address: unknown }[] = [];
+    for (const message of this.conversationPlanningMetadata(sessionId, selected)) {
+      if (!this.planningMessageReadable(handle, message.value)) continue;
+      const row = this.db.prepare("SELECT created_at,rowid AS ordinal,json_extract(payload,'$.contextReceipt.campusReadingAddresses') AS addresses FROM messages WHERE id=? AND session_id=? AND role='assistant' AND json_extract(payload,'$.status')='done'").get(message.id, sessionId);
+      if (typeof row?.addresses !== 'string') continue;
+      try {
+        const addresses: unknown = JSON.parse(row.addresses);
+        if (Array.isArray(addresses) && addresses.length <= 6) result.push(...addresses.map(address => ({ messageId: message.id,
+          messageCreatedAt: String(row.created_at), messageOrdinal: Number(row.ordinal), address })));
+      } catch { /* A damaged receipt is not a readable query address. */ }
+    }
+    return result.sort((a, b) => a.messageOrdinal - b.messageOrdinal);
+  }
+  /** Only prior owner addresses and their authorization headers; never reply
+   * text, grade values, or renewed permission to read the original body. */
+  conversationCampusReadingNavigation(handle: ScopeHandle, sessionId: string, selector: CampusReadingSelector, audit = true) {
+    const scope = this.scope(handle), revoked = this.getMeta<string[]>('revoked', []);
+    if (selector.resource !== 'gpa_overall' || selector.object !== 'major_gpa'
+      || selector.messageId !== undefined && (typeof selector.messageId !== 'string' || !selector.messageId || selector.messageId.length > 160)
+      || scope.child || scope.principalId !== this.identity.principalId || scope.workspaceId !== this.identity.workspaceId
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || !scope.sources.includes('history:self') || !scope.sources.includes('campus:academic-account')
+      || !scope.grants.includes('evidence:read') || !scope.grants.includes('campus:read')
+      || revoked.some(grant => ['evidence:read', 'campus:read', 'campus:gpa:read'].includes(grant))
+      || this.hasFence('history:self') || this.hasFence('campus:academic-account')) return [];
+    const matches = `json_extract(a.value,'$.sourceId')='campus:academic-account'
+      AND json_extract(a.value,'$.snapshot.resource')='gpa_overall'
+      AND json_extract(a.value,'$.object.kind')='major_gpa'
+      AND json_extract(a.value,'$.read.capability')='campus.query'
+      AND json_extract(a.value,'$.read.arguments.resource')='gpa_overall'`;
+    const row = this.db.prepare(`SELECT m.id,m.created_at,m.rowid AS ordinal,
+      json_extract(m.payload,'$.contextReceipt.id') AS receipt_id,
+      json_extract(m.payload,'$.contextReceipt.campusSensitiveReads') AS sensitive_reads,
+      (SELECT json_group_array(json(a.value)) FROM json_each(json_extract(m.payload,'$.contextReceipt.campusReadingAddresses')) a WHERE ${matches}) AS addresses
+      FROM messages m WHERE m.session_id=? AND m.role='assistant' AND json_extract(m.payload,'$.status')='done'
+      AND json_type(m.payload,'$.contextReceipt.id')='text'
+      AND json_type(m.payload,'$.contextReceipt.campusReadingAddresses')='array'
+      AND json_array_length(m.payload,'$.contextReceipt.campusReadingAddresses') BETWEEN 1 AND 6
+      AND COALESCE(json_extract(m.payload,'$.contextReceipt.campusReadingIncomplete'),0)!=1
+      AND EXISTS(SELECT 1 FROM json_each(json_extract(m.payload,'$.contextReceipt.campusReadingAddresses')) a WHERE ${matches})
+      ${selector.messageId ? 'AND m.id=?' : ''} ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1`)
+      .get(sessionId, ...(selector.messageId ? [selector.messageId] : []));
+    if (!row || this.hasFence(String(row.id), 'history:self') || typeof row.receipt_id !== 'string'
+      || !row.receipt_id || row.receipt_id.length > 160 || typeof row.addresses !== 'string' || typeof row.sensitive_reads !== 'string') return [];
+    let addresses: unknown, sensitiveReads: unknown;
+    try { addresses = JSON.parse(row.addresses); sensitiveReads = JSON.parse(row.sensitive_reads); }
+    catch { return []; }
+    if (!Array.isArray(addresses) || !addresses.length || addresses.length > 6 || !Array.isArray(sensitiveReads) || sensitiveReads.length > 64) return [];
+    const reads = sensitiveReads.flatMap(value => {
+      const parsed = campusSensitiveReadSchema.safeParse(value);
+      return parsed.success && parsed.data.resource === 'gpa_overall' && parsed.data.sourceId === 'campus:academic-account'
+        && parsed.data.grant === 'campus:gpa:read' ? [parsed.data] : [];
+    });
+    const authorizations = [...new Map(reads.map(read => [read.authorizationEventId + ':' + read.authorizationContentVersion,
+      { eventId: read.authorizationEventId, contentVersion: read.authorizationContentVersion }])).values()]
+      .sort((left, right) => left.eventId.localeCompare(right.eventId) || left.contentVersion - right.contentVersion);
+    if (!authorizations.length || authorizations.some(ref => {
+      if (this.hasFence(ref.eventId, 'history:self')) return true;
+      const original = this.db.prepare(`SELECT json_extract(payload,'$.contentVersion') AS version FROM h_evidence
+        WHERE id=? AND owner=? AND workspace=? AND subject=? AND world='real' AND status='active'
+        AND json_extract(payload,'$.speaker')='user' AND json_extract(payload,'$.authority')='user_statement'`)
+        .get(ref.eventId, scope.principalId, scope.workspaceId, scope.principalId);
+      return !original || original.version !== ref.contentVersion;
+    })) return [];
+    if (audit) this.recordAccess(handle, { id: row.id, source: 'history:self' }, 'conversation_campus_address_navigation');
+    return addresses.map(address => ({ messageId: String(row.id), messageCreatedAt: String(row.created_at),
+      messageOrdinal: Number(row.ordinal), address,
+      navigation: { sessionId, messageId: String(row.id), receiptId: row.receipt_id as string,
+        addressSha256: createHash('sha256').update(canonical(address)).digest('hex'), authorizations } }));
+  }
+  campusReadingNavigationCurrent(handle: ScopeHandle, raw: unknown): boolean {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+    const proof = raw as CampusSavedReadingProof;
+    if (proof.navigation === undefined) return true;
+    const navigation = proof.navigation;
+    if (!navigation || typeof navigation !== 'object' || proof.resource !== 'gpa_overall'
+      || typeof navigation.sessionId !== 'string' || typeof navigation.messageId !== 'string'
+      || typeof navigation.addressSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(navigation.addressSha256)) return false;
+    const { navigation: _navigation, ...snapshot } = proof;
+    return this.conversationCampusReadingNavigation(handle, navigation.sessionId,
+      { resource: 'gpa_overall', object: 'major_gpa', messageId: navigation.messageId }, false)
+      .some(candidate => canonical(candidate.navigation) === canonical(navigation)
+        && candidate.address && typeof candidate.address === 'object'
+        && canonical((candidate.address as { snapshot?: unknown }).snapshot) === canonical(snapshot));
+  }
+  conversationCampusReadingSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): CampusSavedReadingProof[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.sources.includes('campus:academic-account')
+      || !scope.grants.includes('evidence:read') || !scope.grants.includes('campus:read')
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self') return [];
+    const result: CampusSavedReadingProof[] = [];
+    for (const message of this.conversationPlanningMetadata(sessionId, new Set(messageIds))) {
+      if (!this.planningMessageReadable(handle, message.value)) continue;
+      const receipt = message.value.contextReceipt;
+      if (Array.isArray(receipt.campusReadingProofs)) result.push(...receipt.campusReadingProofs);
+      if (Array.isArray(receipt.campusReadingSources)) result.push(...receipt.campusReadingSources);
+    }
+    return [...new Map(result.map(proof => [canonical(proof), proof])).values()];
+  }
+  campusSceneSourceMessageIds(handle: ScopeHandle, sessionId: string, scene: { id: string; revision: number }): string[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.sources.includes('campus:academic-account')
+      || !scope.grants.includes('evidence:read') || !scope.grants.includes('campus:read')
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self') return [];
+    return this.db.prepare(`SELECT DISTINCT m.id FROM messages m,json_each(m.payload,'$.scenes') scene
+      WHERE m.session_id=? AND m.role='assistant' AND json_extract(m.payload,'$.status')='done'
+      AND json_extract(scene.value,'$.id')=? AND json_extract(scene.value,'$.revision')=?`).all(sessionId, scene.id, scene.revision)
+      .map(row => String(row.id)).filter(id => !this.hasFence(id));
+  }
+  /** Same-conversation file navigation only: no reply body or file permission.
+   * Explicit message IDs must already be admitted by the original history read;
+   * automatic candidates are never supplied to a child. The material owner
+   * checks each raw read against its current scope, binding and file version. */
+  conversationMaterialReadCandidates(handle: ScopeHandle, sessionId: string,
+    options: { excludeIds?: string[]; messageIds?: string[]; limit?: number } = {}) {
+    const scope = this.scope(handle), explicit = options.messageIds !== undefined;
+    const selected = [...new Set(options.messageIds || [])];
+    const limit = Number.isSafeInteger(options.limit) ? Math.max(0, Math.min(6, options.limit!)) : 1;
+    if (!limit || explicit && !selected.length || scope.child && !explicit
+      || scope.principalId !== this.identity.principalId || scope.workspaceId !== this.identity.workspaceId
+      || !scope.sources.includes('history:self') || !scope.grants.includes('evidence:read')
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || this.hasFence('history:self')) return [];
+    const rows = this.db.prepare(`SELECT m.id,m.created_at,m.rowid AS ordinal,
+      json_extract(m.payload,'$.status') AS reply_status,
+      json_extract(m.payload,'$.contextReceipt.id') AS receipt_id,
+      json_extract(m.payload,'$.contextReceipt.materialReads') AS material_reads
+      FROM messages m WHERE m.session_id=? AND m.role='assistant' AND ${assistantReplyStatusSql()}
+      AND json_type(m.payload,'$.contextReceipt.id')='text'
+      AND length(trim(json_extract(m.payload,'$.contextReceipt.id'))) BETWEEN 1 AND 160
+      AND json_type(m.payload,'$.contextReceipt.materialReads')='array'
+      AND json_array_length(m.payload,'$.contextReceipt.materialReads')>0
+      AND m.id NOT IN (SELECT value FROM json_each(?))
+      ${explicit ? 'AND m.id IN (SELECT value FROM json_each(?))' : ''}
+      ORDER BY m.created_at DESC,m.rowid DESC LIMIT ?`).all(sessionId, JSON.stringify(options.excludeIds || []),
+        ...(explicit ? [JSON.stringify(selected)] : []), limit);
+    const result: { messageId: string; messageCreatedAt: string; messageOrdinal: number; receiptId: string; reads: unknown[];
+      replyState?: MemoryReferenceContext['replyState'] }[] = [];
+    for (const row of rows.reverse()) {
+      if (this.hasFence(String(row.id), 'history:self') || typeof row.receipt_id !== 'string'
+        || !row.receipt_id.trim() || row.receipt_id.length > 160 || typeof row.material_reads !== 'string') continue;
+      let reads: unknown;
+      try { reads = JSON.parse(row.material_reads); }
+      catch (error) { if (error instanceof SyntaxError) continue; throw error; }
+      if (!Array.isArray(reads) || !reads.length) continue;
+      this.recordAccess(handle, { id: row.id, source: 'history:self' }, 'conversation_material_navigation');
+      const state = assistantReplyState(row.reply_status);
+      result.push({ messageId: String(row.id), messageCreatedAt: String(row.created_at), messageOrdinal: Number(row.ordinal),
+        receiptId: row.receipt_id, reads, ...(state.replyState ? { replyState: { ...state.replyState,
+          meaning: "The original response was interrupted. Only material access addresses are supplied, without the old response body or claims of completion or reading." } } : {}) });
+    }
+    return result;
+  }
+  /** Exact carrier receipt metadata for multi-hop navigation provenance.
+   * Its publication state is checked without selecting the reply body. */
+  materialNavigationViaMetadata(handle: ScopeHandle, ref: Pick<MaterialNavigationProof, 'messageId' | 'sessionId' | 'receiptId'>):
+    { receiptId: string; sources: unknown } | undefined {
+    const scope = this.scope(handle);
+    if (scope.principalId !== this.identity.principalId || scope.workspaceId !== this.identity.workspaceId
+      || !scope.sources.includes('history:self') || !scope.grants.includes('evidence:read')
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || this.hasFence(ref.messageId, 'history:self') || typeof ref.receiptId !== 'string'
+      || !ref.receiptId.trim() || ref.receiptId.length > 160) return;
+    const row = this.db.prepare(`SELECT json_extract(m.payload,'$.contextReceipt.id') AS receipt_id,
+      json_extract(m.payload,'$.contextReceipt.materialNavigationSources') AS sources
+      FROM messages m WHERE m.id=? AND m.session_id=? AND m.role='assistant' AND ${assistantReplyStatusSql()}
+      AND json_type(m.payload,'$.contextReceipt.id')='text'
+      AND json_type(m.payload,'$.contextReceipt.materialNavigationSources')='array'`)
+      .get(ref.messageId, ref.sessionId);
+    if (!row || row.receipt_id !== ref.receiptId || typeof row.sources !== 'string') return;
+    const sources: unknown = JSON.parse(row.sources);
+    this.recordAccess(handle, { id: ref.messageId, source: 'history:self' }, 'material_navigation_carrier');
+    return { receiptId: ref.receiptId, sources };
+  }
+  /** Inherit only sources of reply bodies already admitted by their original
+   * history reader. This never turns navigation permission into a body read. */
+  conversationMaterialNavigationSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): MaterialNavigationProof[] {
+    const scope = this.scope(handle);
+    if (!messageIds.length || !scope.sources.includes('history:self') || !scope.grants.includes('evidence:read')
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self') return [];
+    const sources: MaterialNavigationProof[] = [];
+    for (const row of this.conversationPlanningMetadata(sessionId, new Set(messageIds))) {
+      if (!this.planningMessageReadable(handle, row.value))
+        throw new HarnessError('material_navigation_changed', "A material address in this context changed. Return to currently permitted sources.");
+      const raw = row.value.contextReceipt.materialNavigationSources;
+      if (raw === undefined || !raw.length) continue;
+      const receiptId = row.value.contextReceipt.id;
+      if (typeof receiptId !== 'string' || !receiptId.trim() || receiptId.length > 160)
+        throw new HarnessError('material_navigation_changed', "This context's host-address proof is incomplete. Old response receipts were not guessed.");
+      for (const value of raw) {
+        const source = materialNavigationProofSchema.parse(value);
+        const via = [...new Map([...(source.via || []), ...(source.messageId === row.id ? []
+          : [{ messageId: row.id, sessionId, receiptId }])].map(address => [canonical(address), address])).values()];
+        sources.push({ ...source, ...(via.length ? { via } : {}) });
+      }
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  private messageImageAttachments(handle: ScopeHandle, messageId: string) {
+    const rows = this.db.prepare(`SELECT id FROM h_evidence WHERE owner=? AND workspace=? AND status='active'
+      AND json_extract(payload,'$.parentEventId')=? AND json_extract(payload,'$.kind')='user_message'
+      AND json_type(payload,'$.imageSource')='object' ORDER BY seq`).all(this.identity.principalId, this.identity.workspaceId, messageId);
+    const images = rows.flatMap(row => {
+      const event = this.evidence(handle, String(row.id));
+      const image = event && !this.sourceRestrictions(handle, event.id).length && !this.sourceLineageRestricted(event) ? evidenceImageRead(event) : undefined;
+      return image ? [{ id: event!.id, name: event!.text, ...image }] : [];
+    });
+    return images.length ? { images } : {};
+  }
+  /** Select permitted transcript bodies in SQL, before they enter model memory. */
+  conversationHistory(handle: ScopeHandle, sessionId: string, excludeIds: string[], limit = 12,
+    options: { beforeMessageId?: string } = {}) {
+    const s = this.scope(handle);
+    if (!s.sources.includes('history:self') || s.audience !== 'self' || s.subjectId !== s.principalId || s.worldId !== 'real') return [];
+    const before = options.beforeMessageId ? this.db.prepare('SELECT created_at,rowid AS ordinal FROM messages WHERE id=? AND session_id=?')
+      .get(options.beforeMessageId, sessionId) : undefined;
+    if (options.beforeMessageId && !before) return [];
+    const f = this.filter(handle);
+    const denied = this.conversationPlanningMetadata(sessionId).filter(row => !this.planningMessageReadable(handle, row.value)).map(row => row.id);
+    const rows = this.db.prepare(`SELECT m.id,m.role,CASE WHEN m.role='user' THEN (SELECT content FROM h_evidence WHERE id=m.id) ELSE m.content END AS content,m.created_at,
+      json_extract(m.payload,'$.status') AS reply_status,
+      CASE WHEN m.role='user' THEN (SELECT version FROM h_evidence WHERE id=m.id) END AS content_version,
+      CASE WHEN m.role='user' THEN (SELECT json_extract(payload,'$.imageSource') FROM h_evidence WHERE id=m.id AND json_extract(payload,'$.kind')='user_message') END AS image_source,
+      CASE WHEN m.role='user' THEN (SELECT json_extract(payload,'$.sourceContext') FROM h_evidence WHERE id=m.id) END AS source_context FROM messages m
+      WHERE m.session_id=? AND m.id NOT IN (SELECT value FROM json_each(?))
+      ${before ? 'AND (m.created_at<? OR (m.created_at=? AND m.rowid<?))' : ''}
+      AND ((m.role='user' AND json_extract(m.payload,'$.status')='done')
+        OR (m.role='assistant' AND ${assistantReplyStatusSql()}))
+      AND ((m.role='user' AND EXISTS(SELECT 1 FROM h_evidence r WHERE r.id=m.id AND ${f.sql} AND r.status='active'
+        AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id)))
+        OR (m.role='assistant' AND json_extract(m.payload,'$.contextReceipt.privacyEpoch')=?
+          AND json_extract(m.payload,'$.contextReceipt.policyRevision')=?
+          AND json_type(m.payload,'$.contextReceipt.providedSourceIds')='array'
+          AND m.id NOT IN (SELECT value FROM json_each(?))
+          AND NOT EXISTS(SELECT 1 FROM json_each(m.payload,'$.contextReceipt.providedSourceIds') src
+            WHERE src.value NOT IN (SELECT value FROM json_each(?)))))
+      ORDER BY m.created_at DESC,m.rowid DESC LIMIT ?`).all(
+       sessionId, JSON.stringify(excludeIds), ...(before ? [before.created_at, before.created_at, before.ordinal] : []),
+       ...f.params, s.privacyEpoch, s.policyRevision, JSON.stringify(denied), JSON.stringify(s.sources), Math.min(24, limit),
+    );
+    for (const row of rows) this.recordAccess(handle, { ...row, source: 'history:self' }, 'conversation_history');
+    return rows.reverse().map(row => ({ id: String(row.id), role: row.role as 'user' | 'assistant', content: String(row.content), createdAt: String(row.created_at),
+      ...(row.role === 'assistant' ? assistantReplyState(row.reply_status) : {}),
+      ...(row.role === 'user' ? { contentVersion: Number(row.content_version) } : {}),
+      ...(row.role === 'user' ? { ...sourceImageProjection(row.image_source, String(row.id), Number(row.content_version)), ...this.messageImageAttachments(handle, String(row.id)) } : {}),
+      ...sourceContextProjection(row.source_context) }));
+  }
+  /** A linked source observation can inform a same-conversation continuation.
+   * This is only an automatic context window; older evidence remains searchable
+   * and its truth is never inferred from its age. */
+  sessionExternalObservations(handle: ScopeHandle, sessionId: string, at: string, limit = 2): EvidenceEvent[] {
+    const s = this.scope(handle);
+    if (!s.sources.includes('history:self') || s.audience !== 'self' || s.subjectId !== s.principalId || s.worldId !== 'real') return [];
+    const now = Date.parse(at);
+    if (!Number.isFinite(now)) return [];
+    const f = this.filter(handle);
+    const rows = this.db.prepare(`SELECT r.* FROM h_evidence r WHERE ${f.sql} AND r.status='active'
+      AND json_extract(r.payload,'$.sessionId')=? AND json_extract(r.payload,'$.speaker')='external'
+      AND json_extract(r.payload,'$.kind')='external_observation'
+      AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id)
+      ORDER BY r.seq DESC LIMIT 12`).all(...f.params, sessionId);
+    const selected = rows.map(row => parse<EvidenceEvent>(row)!).filter(event => {
+      const age = now - Date.parse(event.receivedAt);
+      return Number.isFinite(age) && age >= 0 && age <= 3 * 86400000;
+    }).slice(0, Math.min(2, limit)).reverse();
+    for (const event of selected) this.recordAccess(handle, { id: event.id, source: event.sourceId }, 'session_external_observation');
+    return selected;
+  }
+  /** One older, related user statement from this session. Scope and session
+   * filters run in SQL before any candidate body is returned. It supplements
+   * a short recent window, never searches another conversation or profile. */
+  conversationAnchor(handle: ScopeHandle, sessionId: string, query: string, excludeIds: string[]) {
+    const s = this.scope(handle);
+    if (!s.sources.includes('history:self') || s.audience !== 'self' || s.subjectId !== s.principalId || s.worldId !== 'real') return null;
+    const points = Array.from(query.normalize('NFKC').toLowerCase()).slice(0, 240);
+    const grams = [...new Set(points.slice(0, -1).map((point, index) => point + points[index + 1])
+      .filter(gram => /^[\p{L}\p{N}]{2}$/u.test(gram)))].slice(0, 24);
+    if (!grams.length) return null;
+    const f = this.filter(handle);
+    let row = this.db.prepare(`WITH eligible AS MATERIALIZED(
+      SELECT r.id,r.seq,r.content,r.version,m.created_at,json_extract(r.payload,'$.sourceContext') AS source_context,
+        CASE WHEN json_extract(r.payload,'$.kind')='user_message' THEN json_extract(r.payload,'$.imageSource') END AS image_source FROM h_evidence r JOIN messages m ON m.id=r.id
+      WHERE ${f.sql} AND m.session_id=? AND m.role='user' AND r.status='active'
+      AND r.id NOT IN (SELECT value FROM json_each(?))
+      AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id)),
+      scored AS (SELECT e.*,(${grams.map(() => 'CASE WHEN instr(lower(e.content),?)>0 THEN 1 ELSE 0 END').join('+')}) AS matches FROM eligible e)
+      SELECT id,content,version,created_at,source_context,image_source FROM scored WHERE matches>0 ORDER BY matches DESC,seq DESC LIMIT 1`).get(
+      ...f.params, sessionId, JSON.stringify(excludeIds), ...grams,
+    );
+    // A deictic follow-up can share no literal bigram with its earlier
+    // subject ("that math" versus an equation). Under the same SQL boundary,
+    // retain one substantial older user statement as a candidate. Its length
+    // is only a retrieval fallback, never evidence that it is still the topic.
+    if (!row) row = this.db.prepare(`SELECT r.id,r.content,r.version,m.created_at,json_extract(r.payload,'$.sourceContext') AS source_context,
+      CASE WHEN json_extract(r.payload,'$.kind')='user_message' THEN json_extract(r.payload,'$.imageSource') END AS image_source FROM h_evidence r JOIN messages m ON m.id=r.id
+      WHERE ${f.sql} AND m.session_id=? AND m.role='user' AND r.status='active'
+      AND r.id NOT IN (SELECT value FROM json_each(?))
+      AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id)
+      ORDER BY length(r.content) DESC,r.seq DESC LIMIT 1`).get(...f.params, sessionId, JSON.stringify(excludeIds));
+    if (!row) return null;
+    this.recordAccess(handle, { ...row, source: 'history:self' }, 'conversation_anchor');
+    return { id: String(row.id), role: 'user' as const, content: String(row.content), contentVersion: Number(row.version), createdAt: String(row.created_at),
+      ...sourceImageProjection(row.image_source, String(row.id), Number(row.version)), ...this.messageImageAttachments(handle, String(row.id)),
+      ...sourceContextProjection(row.source_context) };
+  }
+  pendingConstraints(handle: ScopeHandle, sessionId: string): EvidenceEvent[] {
+    const f = this.filter(handle);
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT r.* FROM h_evidence r JOIN messages m ON m.id=r.id WHERE ${f.sql} AND m.session_id=? AND r.status='active'
+      AND EXISTS(SELECT 1 FROM h_spans p WHERE p.event_id=r.id AND p.status IN ('pending','failed','needs_context'))
+      AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id) ORDER BY r.seq DESC LIMIT 50`,
+      )
+      .all(...f.params, sessionId);
+    return rows.map((row) => {
+      this.recordAccess(handle, row, 'pending_constraint');
+      return parse<EvidenceEvent>(row)!;
+    });
+  }
+  searchEvidence(handle: ScopeHandle, query: string, limit = 12, offset = 0): EvidenceEvent[] {
+    const terms = [...new Set(query.trim().toLowerCase().split(/\s+/).filter(Boolean))];
+    if (!terms.length) return [];
+    const f = this.evidenceDiscoveryFilter(handle),
+      patterns = terms.map((t) => '%' + t.replace(/[\\%_]/g, '\\$&') + '%');
+    // Index misses and pending extraction never hide original evidence. SQL scope precedes the bounded result set.
+    const rows = this.db
+      .prepare(
+        `SELECT r.* FROM h_evidence r WHERE ${f.sql} AND r.status!='deleted'
+      AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id AND x.predicate='*')
+      AND NOT EXISTS(SELECT 1 FROM json_each(?) term WHERE lower(r.content) NOT LIKE term.value ESCAPE '\\')
+      ORDER BY r.seq DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...f.params, JSON.stringify(patterns), Math.max(1, Math.min(limit, 51)), Math.max(0, offset));
+    return rows.map((row) => {
+      this.recordAccess(handle, row, 'original_search');
+      return parse<EvidenceEvent>(row)!;
+    });
+  }
+  lexicalEvidence(handle: ScopeHandle, query: string, limit = 12, offset = 0): EvidenceEvent[] {
+    const f = this.evidenceDiscoveryFilter(handle), grams = queryGrams(query);
+    if (!grams.length) return this.searchEvidence(handle, query, limit, offset);
+    // Apply scope before matching, then rank indexed and unindexed originals
+    // together. OFFSET applies to the complete result set, never a top-50 pool.
+    const rows = this.db.prepare(`WITH query_grams AS MATERIALIZED(SELECT value AS gram FROM json_each(?)),
+      eligible AS MATERIALIZED(SELECT r.* FROM h_evidence r WHERE ${f.sql} AND r.status!='deleted'
+        AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=r.id AND x.predicate='*')),
+      scores AS (
+        SELECT r.id,count(*) AS matches FROM eligible r JOIN h_grams g ON g.object_id=r.id
+          JOIN query_grams q ON q.gram=g.gram WHERE g.kind='evidence' GROUP BY r.id
+        UNION ALL
+        SELECT r.id,(SELECT count(*) FROM query_grams q WHERE instr(lower(r.content),q.gram)>0) AS matches FROM eligible r
+          WHERE NOT EXISTS(SELECT 1 FROM h_grams g WHERE g.object_id=r.id AND g.kind='evidence'))
+      SELECT r.*,scores.matches FROM eligible r JOIN scores ON scores.id=r.id WHERE scores.matches>0
+        ORDER BY CASE WHEN instr(lower(r.content),?)>0 THEN 1 ELSE 0 END DESC,scores.matches DESC,r.seq DESC
+        LIMIT ? OFFSET ?`).all(JSON.stringify(grams), ...f.params, query.trim().toLowerCase(), Math.max(1, Math.min(limit, 51)), Math.max(0, offset));
+    return rows.map((row) => {
+      this.recordAccess(handle, row, 'lexical_search');
+      return parse<EvidenceEvent>(row)!;
+    });
+  }
+  lexicalAssertions(handle: ScopeHandle, query: string, limit = 24): Assertion[] {
+    return this.lexicalAssertionPage(handle, query, { limit }).items;
+  }
+  lexicalAssertionPage(handle: ScopeHandle, query: string,
+    options: { limit?: number; offset?: number; at?: string; strength?: 'hard' | 'non_hard'; verified?: boolean } = {}) {
+    if (!this.personalMemoryReadable(handle)) return { items: [] as Assertion[], total: 0 };
+    this.refreshCitationRestrictions();
+    const f = this.filter(handle), e = this.filter(handle, 'e'), grams = queryGrams(query);
+    if (!grams.length) return { items: [] as Assertion[], total: 0 };
+    if (options.at && !Number.isFinite(Date.parse(options.at))) throw new HarnessError('invalid_time', "The retrieval time is invalid.");
+    // Permission, verification and valid-time eligibility precede ranking and
+    // pagination so stale or inaccessible high-score rows cannot crowd out truth.
+    const base = `WITH query_grams AS MATERIALIZED(SELECT value AS gram FROM json_each(?)),
+      eligible AS MATERIALIZED(SELECT r.id,r.rowid AS ordinal FROM h_assertions r WHERE ${f.sql} AND r.status='active'
+        AND r.id NOT IN (SELECT value FROM json_each(?))
+        AND NOT EXISTS(SELECT 1 FROM h_assertion_citations ae LEFT JOIN h_evidence e ON e.id=ae.event_id
+          WHERE ae.assertion_id=r.id AND ae.assertion_revision=r.revision AND (e.id IS NULL OR NOT (${e.sql}) OR e.status='deleted'))
+        ${options.verified ? "AND json_extract(r.payload,'$.verification')='verified'" : ''}
+        ${options.at ? 'AND (r.valid_from IS NULL OR julianday(r.valid_from)<=julianday(?)) AND (r.valid_to IS NULL OR julianday(r.valid_to)>julianday(?))' : ''}
+        ${options.strength === 'hard' ? "AND r.strength='hard'" : options.strength === 'non_hard' ? "AND r.strength!='hard'" : ''}),
+      scored AS (SELECT a.id,a.ordinal,count(*) AS matches FROM eligible a JOIN h_grams g ON g.object_id=a.id
+        JOIN query_grams q ON q.gram=g.gram WHERE g.kind='assertion' GROUP BY a.id)`;
+    const params = [JSON.stringify(grams), ...f.params, JSON.stringify(this.unreadableAssertionReferences(handle)), ...e.params, ...(options.at ? [options.at, options.at] : [])];
+    const rows = this.db.prepare(`${base} SELECT *,count(*) OVER() AS total FROM scored ORDER BY matches DESC,ordinal DESC,id
+      LIMIT ? OFFSET ?`).all(...params, Math.max(1, Math.min(options.limit || 24, 51)), Math.max(0, options.offset || 0));
+    const total = rows.length ? Number(rows[0].total) : Number(this.db.prepare(`${base} SELECT count(*) AS total FROM scored`).get(...params)?.total || 0);
+    return { items: rows.map(row => this.assertion(handle, String(row.id))).filter((a): a is Assertion => !!a), total };
+  }
+  spans(handle: ScopeHandle, eventId: string): ProcessingSpan[] {
+    if (!this.evidence(handle, eventId)) return [];
+    return this.db
+      .prepare(
+        'SELECT id,event_id AS eventId,content_version AS contentVersion,start_cp AS start,end_cp AS end,status,indexed FROM h_spans WHERE event_id=? ORDER BY start_cp',
+      )
+      .all(eventId)
+      .map((r) => ({ ...r, indexed: !!r.indexed }) as unknown as ProcessingSpan);
+  }
+  /** Legal new-inference windows, projected through proven affine source lineage.
+   * Receipts for old assertions never authorize another read of stopped text. */
+  availableInferenceRanges(event: EvidenceEvent): { start: number; end: number }[] {
+    const length = Array.from(event.text).length;
+    if (!length || event.status === 'deleted') return [];
+    let lineage: ReturnType<KernelRepository['sourceOrigins']>;
+    try { lineage = this.sourceOrigins(event, { start: 0, end: length }); }
+    catch (error) {
+      if (error instanceof HarnessError && error.code === 'source_lineage_budget') return [];
+      throw error;
+    }
+    if (!lineage.complete) return [];
+    const deleted = this.fences().filter(fence => fence.kind === 'delete').flatMap(fence => fence.spans || []);
+    const excluded: { start: number; end: number }[] = [];
+    for (const origin of lineage.spans) {
+      if (!origin.sourceId || !Number.isSafeInteger(origin.contentVersion) || !Number.isSafeInteger(origin.start)
+        || !Number.isSafeInteger(origin.end) || origin.start! < 0 || origin.end! - origin.start! !== length) return [];
+      const current = this.db.prepare('SELECT source,version,status FROM h_evidence WHERE id=? AND owner=? AND workspace=?')
+        .get(origin.eventId, event.ownerId, event.workspaceId);
+      if (!current || current.status === 'deleted' || Number(current.version) !== origin.contentVersion
+        || String(current.source) !== origin.sourceId || this.hasFence(origin.eventId, origin.sourceId)) return [];
+      const cuts = [
+        ...deleted.filter(cut => cut.eventId === origin.eventId).map(cut => ({ version: cut.contentVersion, start: cut.start, end: cut.end })),
+        ...this.sourceSpanRestrictions(origin).map(row => ({ version: row.content_version, start: row.start_cp, end: row.end_cp, whole: row.predicate === '*' })),
+      ];
+      for (const cut of cuts) {
+        if ('whole' in cut && cut.whole || cut.version !== origin.contentVersion || !Number.isSafeInteger(cut.start)
+          || !Number.isSafeInteger(cut.end) || Number(cut.start) < 0 || Number(cut.end) <= Number(cut.start)) return [];
+        const start = Math.max(0, Number(cut.start) - origin.start!), end = Math.min(length, Number(cut.end) - origin.start!);
+        if (end > start) excluded.push({ start, end });
+      }
+    }
+    let ranges = [{ start: 0, end: length }];
+    for (const cut of excluded) ranges = ranges.flatMap(range => cut.end <= range.start || cut.start >= range.end ? [range]
+      : [...(cut.start > range.start ? [{ start: range.start, end: cut.start }] : []), ...(cut.end < range.end ? [{ start: cut.end, end: range.end }] : [])]);
+    return ranges;
+  }
+  /** Host recovery queue: least-recently-attempted first, with durable backoff.
+   * A pending WAL entry is not permission to revive paused or restricted data. */
+  memoryRecoveryCandidates(eventId?: string) {
+    return this.db.prepare(`SELECT e.id,e.received_at,e.source,e.purpose,json_extract(e.payload,'$.interpretationTimeZone') AS time_zone
+      FROM h_evidence e LEFT JOIN h_memory_recovery q ON q.event_id=e.id
+      WHERE e.owner=? AND e.workspace=? AND e.subject=? AND e.world='real'
+        AND e.infer=1 AND e.retain='purpose_scoped' AND e.status IN ('active','redacted') AND json_extract(e.payload,'$.speaker')='user'
+        AND (e.expires_at IS NULL OR julianday(e.expires_at)>julianday(?))
+        AND (? IS NULL OR e.id=?) AND (q.due_at IS NULL OR julianday(q.due_at)<=julianday(?))
+        AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=e.id AND x.predicate='*')
+        AND NOT EXISTS(SELECT 1 FROM h_evidence_roots r JOIN h_source_restrictions x ON x.event_id=r.root_id WHERE r.event_id=e.id AND x.predicate='*')
+        AND EXISTS(SELECT 1 FROM h_spans s WHERE s.event_id=e.id AND s.status IN ('pending','needs_context'))
+      ORDER BY COALESCE(q.last_attempt_at,''),e.seq`).all(this.identity.principalId, this.identity.workspaceId,
+        this.identity.principalId, this.clock.now(), eventId || null, eventId || null, this.clock.now());
+  }
+  memoryContextProgress(handle: ScopeHandle, spanId: string) {
+    const row = this.db.prepare('SELECT * FROM h_memory_context WHERE span_id=?').get(spanId);
+    if (!row || !this.evidence(handle, String(row.event_id))) return undefined;
+    return { sourceVersion: Number(row.source_version), methodVersion: String(row.method_version),
+      attemptSignature: String(row.attempt_signature), sourceSignature: String(row.source_signature), contextWatermark: Number(row.context_watermark),
+      requestSignature: String(row.request_signature), requests: JSON.parse(String(row.requests)) as { eventId: string; contentVersion: number; start: number; end: number }[],
+      requestResults: JSON.parse(String(row.request_results)) as { index: number; status: string }[],
+      scopeBinding: JSON.parse(String(row.scope_binding)) as MemoryContextScope,
+      ...(row.directory_position ? { directoryPosition: JSON.parse(String(row.directory_position)) as MemoryContextDirectoryPosition } : {}) };
+  }
+  recordMemoryContext(handle: ScopeHandle, eventId: string, spanId: string, value: {
+    sourceVersion: number; methodVersion: string; attemptSignature: string; sourceSignature: string; contextWatermark: number;
+    requestSignature: string; requests: { eventId: string; contentVersion: number; start: number; end: number }[];
+    requestResults: { index: number; status: string }[];
+    scopeBinding: MemoryContextScope;
+    directoryPosition?: MemoryContextDirectoryPosition;
+  }) {
+    this.write(() => {
+      const event = this.evidence(handle, eventId);
+      if (!event || event.contentVersion !== value.sourceVersion || !this.db.prepare('SELECT 1 FROM h_spans WHERE id=? AND event_id=? AND content_version=?').get(spanId, eventId, event.contentVersion))
+        throw new HarnessError('memory_context_changed', "The original changed. Old context progress was not saved.");
+      const position = value.directoryPosition;
+      if (position && (!Number.isSafeInteger(position.before) || !Number.isSafeInteger(position.later)
+        || position.before < 0 || position.before > event.sequence || position.later < event.sequence
+        || position.later > this.getMeta<number>('received_seq', 0)))
+        throw new HarnessError('memory_context_changed', "The original-text directory continuation changed. Consolidation remains at its original position.");
+      const requests = JSON.stringify(value.requests), results = JSON.stringify(value.requestResults);
+      this.db.prepare(`INSERT INTO h_memory_context(span_id,event_id,source_version,method_version,attempt_signature,source_signature,
+        context_watermark,request_signature,requests,request_results,updated_at,scope_binding,directory_position)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(span_id) DO UPDATE SET
+        source_version=excluded.source_version,method_version=excluded.method_version,attempt_signature=excluded.attempt_signature,
+        source_signature=excluded.source_signature,context_watermark=excluded.context_watermark,request_signature=excluded.request_signature,
+        requests=excluded.requests,request_results=excluded.request_results,updated_at=excluded.updated_at,scope_binding=excluded.scope_binding,
+        directory_position=excluded.directory_position`)
+        .run(spanId, eventId, value.sourceVersion, value.methodVersion, value.attemptSignature, value.sourceSignature, value.contextWatermark,
+          value.requestSignature, requests, results, this.clock.now(), JSON.stringify(value.scopeBinding), position ? JSON.stringify(position) : null);
+    });
+  }
+  /** Privacy cleanup owns locator removal, never retry status or new authority. */
+  cleanupMemoryContextRequests() {
+    const fences = this.fences(), removed = (id: string) => {
+      const row = this.db.prepare('SELECT source,status FROM h_evidence WHERE id=?').get(id);
+      return !row || row.status === 'deleted' || this.hasFence(id, String(row.source));
+    };
+    this.write(() => {
+      for (const row of this.db.prepare('SELECT span_id,requests,request_results,scope_binding FROM h_memory_context').all()) {
+        const prior = JSON.parse(String(row.requests)) as { eventId: string; contentVersion: number; start: number; end: number }[];
+        const priorResults = JSON.parse(String(row.request_results)) as { index: number; status: string }[];
+        const retained = prior.map((request, index) => ({ request, index })).filter(({ request }) => {
+          const source = this.db.prepare('SELECT version,payload FROM h_evidence WHERE id=?').get(request.eventId);
+          if (!source || removed(request.eventId) || Number(source.version) !== request.contentVersion) return false;
+          const event = JSON.parse(String(source.payload)) as EvidenceEvent;
+          return this.availableInferenceRanges(event).some(range => request.end > request.start && request.start >= range.start && request.end <= range.end);
+        }).sort((a, b) => a.request.eventId.localeCompare(b.request.eventId) || a.request.contentVersion - b.request.contentVersion
+          || a.request.start - b.request.start || a.request.end - b.request.end);
+        const requests = retained.map(item => item.request), results = retained.map((item, index) => ({ index,
+          status: priorResults.find(result => result.index === item.index)?.status || 'budget_exceeded' }));
+        const binding = JSON.parse(String(row.scope_binding)) as MemoryContextScope;
+        if (Array.isArray(binding.currentEventIds)) binding.currentEventIds = binding.currentEventIds.filter(id => !removed(id));
+        if (Array.isArray(binding.sources)) binding.sources = binding.sources.filter(source => !fences.some(fence => fence.sourceIds.includes(source)));
+        const serializedRequests = JSON.stringify(requests), serializedResults = JSON.stringify(results), serializedBinding = JSON.stringify(binding);
+        if (serializedRequests !== row.requests || serializedResults !== row.request_results || serializedBinding !== row.scope_binding)
+          this.db.prepare('UPDATE h_memory_context SET requests=?,request_results=?,request_signature=?,scope_binding=?,updated_at=? WHERE span_id=?')
+            .run(serializedRequests, serializedResults, createHash('sha256').update(canonical(requests)).digest('hex'), serializedBinding, this.clock.now(), String(row.span_id));
+      }
+    });
+  }
+  nextPendingMemory(eventId?: string) {
+    return this.db.prepare(`SELECT e.id,e.received_at,e.source,e.purpose,json_extract(e.payload,'$.interpretationTimeZone') AS time_zone
+      FROM h_evidence e LEFT JOIN h_memory_recovery q ON q.event_id=e.id
+      WHERE e.owner=? AND e.workspace=? AND e.subject=? AND e.world='real'
+        AND e.infer=1 AND e.retain='purpose_scoped' AND e.status IN ('active','redacted') AND json_extract(e.payload,'$.speaker')='user'
+        AND (e.expires_at IS NULL OR julianday(e.expires_at)>julianday(?))
+        AND (? IS NULL OR e.id=?) AND (q.due_at IS NULL OR julianday(q.due_at)<=julianday(?))
+        AND NOT EXISTS(SELECT 1 FROM h_source_restrictions x WHERE x.event_id=e.id AND x.predicate='*')
+        AND NOT EXISTS(SELECT 1 FROM h_evidence_roots r JOIN h_source_restrictions x ON x.event_id=r.root_id WHERE r.event_id=e.id AND x.predicate='*')
+        AND EXISTS(SELECT 1 FROM h_spans s WHERE s.event_id=e.id AND s.status='pending')
+      ORDER BY COALESCE(q.last_attempt_at,''),e.seq LIMIT 1`).get(this.identity.principalId, this.identity.workspaceId,
+        this.identity.principalId, this.clock.now(), eventId || null, eventId || null, this.clock.now());
+  }
+  recordMemoryAttempt(eventId: string, outcome: 'budget' | 'retryable' | 'interrupted' | 'checked') {
+    const counts = this.db.prepare(`SELECT count(*) AS total,sum(status='pending') AS pending,sum(status='failed') AS failed,
+      sum(status='needs_context') AS needs_context FROM h_spans WHERE event_id=?`).get(eventId)!;
+    const pending = Number(counts.pending || 0), total = Number(counts.total || 0);
+    const status = pending ? 'pending' as const : counts.failed ? 'failed' as const : counts.needs_context ? 'needs_context' as const : 'complete' as const;
+    const previous = Number(this.db.prepare('SELECT transient_failures FROM h_memory_recovery WHERE event_id=?').get(eventId)?.transient_failures || 0);
+    const failures = outcome === 'retryable' ? Math.min(20, previous + 1) : 0;
+    const delay = pending ? outcome === 'retryable' ? Math.min(300000, 1000 * 2 ** (failures - 1)) : outcome === 'budget' ? 1000 : 0 : 0;
+    const deferredUntil = new Date(Date.parse(this.clock.now()) + delay).toISOString();
+    if (this.db.prepare('SELECT 1 FROM h_evidence WHERE id=?').get(eventId)) this.write(() => {
+      this.db.prepare(`INSERT INTO h_memory_recovery VALUES(?,?,?,?,?) ON CONFLICT(event_id) DO UPDATE SET
+        last_attempt_at=excluded.last_attempt_at,due_at=excluded.due_at,transient_failures=excluded.transient_failures,outcome=excluded.outcome`)
+        .run(eventId, this.clock.now(), deferredUntil, failures, outcome);
+    });
+    return { status, pending, total, deferredUntil: pending ? deferredUntil : null };
+  }
+  markSpans(handle: ScopeHandle, eventId: string, status: ProcessingStatus, spanIds?: string[]) {
+    if (!this.evidence(handle, eventId)) throw new HarnessError('source_forbidden', "This source cannot be processed.");
+    this.write(() => {
+      this.db
+        .prepare(
+          `UPDATE h_spans SET status=? WHERE event_id=? ${spanIds?.length ? `AND id IN (${placeholders(spanIds)})` : ''}`,
+        )
+        .run(status, eventId, ...(spanIds || []));
+      if (
+        !this.db
+          .prepare(
+            "SELECT id FROM h_spans WHERE event_id=? AND status IN ('pending','failed','needs_context') LIMIT 1",
+          )
+          .get(eventId)
+      )
+        this.db
+          .prepare("UPDATE h_outbox SET status='done' WHERE object_id=? AND kind='extract'")
+          .run(eventId);
+    });
+  }
+  watermarks(): Watermarks {
+    const base = this.getMeta<number>('sequence_base', 0),
+      received = this.getMeta<number>('received_seq', 0);
+    const rows = this.db
+      .prepare(
+        `SELECT e.seq,e.status, count(s.id) AS total,
+      sum(CASE WHEN s.status IN ('pending','failed','needs_context') THEN 1 ELSE 0 END) AS pending,
+      sum(CASE WHEN s.indexed=0 THEN 1 ELSE 0 END) AS unindexed
+      FROM h_evidence e LEFT JOIN h_spans s ON s.event_id=e.id GROUP BY e.id ORDER BY e.seq`,
+      )
+      .all();
+    const bySeq = new Map(rows.map((r) => [Number(r.seq), r]));
+    let extracted = base,
+      indexed = base;
+    const extractionGaps: number[] = [],
+      indexingGaps: number[] = [];
+    for (let seq = base + 1; seq <= received; seq++) {
+      const row = bySeq.get(seq),
+        extractionDone = !!row && (row.status === 'deleted' || !Number(row.pending)),
+        indexDone = !!row && (row.status === 'deleted' || !Number(row.unindexed));
+      if (extractionDone && extracted === seq - 1) extracted = seq;
+      if (indexDone && indexed === seq - 1) indexed = seq;
+      if (!extractionDone) extractionGaps.push(seq);
+      if (!indexDone) indexingGaps.push(seq);
+    }
+    return {
+      received,
+      extractedContiguous: extracted,
+      indexedContiguous: indexed,
+      extractionGaps,
+      indexingGaps,
+    };
+  }
+  indexEvidence(handle: ScopeHandle, id: string) {
+    const event = this.evidence(handle, id);
+    if (!event) return;
+    this.fault?.('before_index_commit');
+    this.write(() => {
+      this.replaceIndex('evidence', id, event.text);
+      this.db.prepare('UPDATE h_spans SET indexed=1 WHERE event_id=?').run(id);
+      this.db
+        .prepare("UPDATE h_outbox SET status='done' WHERE object_id=? AND kind='index_evidence'")
+        .run(id);
+    });
+  }
+  private replaceIndex(kind: 'evidence' | 'assertion', id: string, text: string) {
+    this.db.prepare(`DELETE FROM h_${kind}_fts WHERE id=?`).run(id);
+    this.db.prepare(`INSERT INTO h_${kind}_fts(id,text) VALUES(?,?)`).run(id, text);
+    this.db.prepare('DELETE FROM h_grams WHERE kind=? AND object_id=?').run(kind, id);
+    const grams = queryGrams(text);
+    const insert = this.db.prepare('INSERT OR IGNORE INTO h_grams VALUES(?,?,?)');
+    for (const gram of grams) insert.run(kind, id, gram);
+  }
+  assertions(
+    handle: ScopeHandle,
+    options: { statuses?: string[]; predicate?: string; strength?: string; limit?: number; offset?: number; at?: string; verified?: boolean } = {},
+  ): Assertion[] {
+    this.scope(handle);
+    this.refreshCitationRestrictions();
+    if (options.at && !Number.isFinite(Date.parse(options.at))) throw new HarnessError('invalid_time', "The retrieval time is invalid.");
+    const f = this.filter(handle),
+      e = this.filter(handle, 'e'),
+      statuses = options.statuses || ['active'];
+    const rows = this.db
+      .prepare(
+        `SELECT r.* FROM h_assertions r WHERE ${f.sql} AND r.status IN (${placeholders(statuses)})
+      AND r.id NOT IN (SELECT value FROM json_each(?))
+      ${options.predicate ? 'AND r.predicate=?' : ''}
+      ${options.strength ? "AND json_extract(r.payload,'$.strength')=?" : ''}
+      ${options.verified ? "AND json_extract(r.payload,'$.verification')='verified'" : ''}
+      ${options.at ? 'AND (r.valid_from IS NULL OR julianday(r.valid_from)<=julianday(?)) AND (r.valid_to IS NULL OR julianday(r.valid_to)>julianday(?))' : ''}
+      AND NOT EXISTS(SELECT 1 FROM h_assertion_citations ae LEFT JOIN h_evidence e ON e.id=ae.event_id WHERE ae.assertion_id=r.id AND ae.assertion_revision=r.revision AND (e.id IS NULL OR NOT (${e.sql}) OR e.status='deleted'))
+      ORDER BY r.revision DESC,r.rowid DESC,r.id LIMIT ? OFFSET ?`,
+      )
+      .all(
+        ...f.params,
+        ...statuses,
+        JSON.stringify(this.unreadableAssertionReferences(handle)),
+        ...(options.predicate ? [options.predicate] : []),
+        ...(options.strength ? [options.strength] : []),
+        ...(options.at ? [options.at, options.at] : []),
+        ...e.params,
+        Math.min(options.limit || 200, 500),
+        Math.max(0, options.offset || 0),
+      );
+    return rows.map((row) => {
+      this.recordAccess(handle, row, 'assertion');
+      return parse<Assertion>(row)!;
+    });
+  }
+  assertion(handle: ScopeHandle, id: string): Assertion | undefined {
+    this.scope(handle);
+    this.refreshCitationRestrictions();
+    const f = this.filter(handle),
+      e = this.filter(handle, 'e');
+    const row = this.db
+      .prepare(
+        `SELECT r.* FROM h_assertions r WHERE ${f.sql} AND r.id=?
+      AND NOT EXISTS(SELECT 1 FROM h_assertion_citations ae LEFT JOIN h_evidence e ON e.id=ae.event_id WHERE ae.assertion_id=r.id AND ae.assertion_revision=r.revision AND (e.id IS NULL OR NOT (${e.sql}) OR e.status='deleted'))`,
+      )
+      .get(...f.params, id, ...e.params);
+    if (row) this.recordAccess(handle, row, 'assertion');
+    const value = parse<Assertion>(row);
+    return value && this.assertionReferenceContextsReadable(handle, value.referenceContexts)
+      && this.citationRows(value.id, value.revision).every(citation => this.citationReadable(handle, citation)) ? value : undefined;
+  }
+  saveAssertion(
+    handle: ScopeHandle,
+    input: Assertion,
+    expectedRevision?: number,
+    locators: { eventId: string; start: number; end: number; contentVersion?: number; role?: AssertionCitation['role']; restrictionReceipt?: string }[] = [],
+  ) {
+    const s = this.scope(handle),
+      value = assertionSchema.parse(input);
+    if (
+      value.ownerId !== s.principalId ||
+      value.workspaceId !== s.workspaceId ||
+      value.subjectId !== s.subjectId ||
+      value.worldId !== s.worldId
+    )
+      throw new HarnessError('scope_mismatch', "The understanding's subject or world does not match.");
+    if (!s.infer || s.retention !== 'purpose_scoped')
+      throw new HarnessError('inference_forbidden', "This material is not for long-term understanding.");
+    if (this.hasFence(value.id)) throw new HarnessError('deleted_object', "Deleted understanding cannot be restored.");
+    if (!this.assertionReferenceContextsReadable(handle, value.referenceContexts))
+      throw new HarnessError('memory_reference_changed', "The understanding's original question or its source changed.");
+    for (const id of value.evidenceIds)
+      if (!this.evidence(handle, id))
+        throw new HarnessError('evidence_forbidden', "Authorized original evidence is missing.");
+    for (const locator of locators) {
+      const source = this.evidence(handle, locator.eventId);
+      if (!source || !this.citationReadable(handle, { ...locator, role: locator.role || 'primary',
+        contentVersion: locator.contentVersion ?? source.contentVersion }, true))
+        throw new HarnessError('citation_forbidden', "The citation's revision, range, permission or current source restriction changed.");
+      if (locator.role !== 'authorization' && !value.evidenceIds.includes(locator.eventId))
+        throw new HarnessError('citation_mismatch', "The fact citation is not in the actual support set.");
+    }
+    this.write(() => {
+      const old = this.db.prepare('SELECT revision,status FROM h_assertions WHERE id=?').get(value.id);
+      if (old && (expectedRevision === undefined || Number(old.revision) !== expectedRevision)) {
+        this.conflicts.push({
+          objectId: value.id,
+          expected: expectedRevision || 0,
+          actual: Number(old.revision),
+        });
+        throw new HarnessError('revision_conflict', "The understanding was updated. Read it before merging.");
+      }
+      if (!old && expectedRevision !== undefined)
+        throw new HarnessError('revision_conflict', "The original understanding no longer exists.");
+      this.db
+        .prepare(
+          `INSERT INTO h_assertions VALUES(${Array(21).fill('?').join(',')}) ON CONFLICT(id) DO UPDATE SET
+        revision=excluded.revision,predicate=excluded.predicate,kind=excluded.kind,status=excluded.status,strength=excluded.strength,
+        valid_from=excluded.valid_from,valid_to=excluded.valid_to,text=excluded.text,payload=excluded.payload,expires_at=excluded.expires_at`,
+        )
+        .run(
+          value.id,
+          ...this.envelope(value, 'profile:self'),
+          value.revision,
+          value.predicate,
+          value.kind,
+          value.status,
+          value.strength,
+          value.temporal.validFrom || null,
+          value.temporal.validTo || null,
+          value.text,
+          JSON.stringify(value),
+        );
+      this.db
+        .prepare('INSERT INTO h_assertion_versions VALUES(?,?,?)')
+        .run(value.id, value.revision, JSON.stringify(value));
+      this.logAssertionRevision(value, old ? Number(old.revision) : null, old ? 'host_update' : 'host_create');
+      const previousLocators = old ? this.citationRows(value.id, Number(old.revision)) : [];
+      // Only the current revision owns these edges. Older revisions retain
+      // their own frozen addresses and are erased separately with that source.
+      const prior = old ? this.db.prepare('SELECT payload FROM h_assertion_versions WHERE id=? AND revision=?').get(value.id, Number(old.revision)) : undefined;
+      const priorReferences = prior ? (JSON.parse(String(prior.payload)) as Assertion).referenceContexts || [] : [];
+      for (const reference of priorReferences) if (!value.referenceContexts?.some(current => current.messageId === reference.messageId))
+        this.db.prepare("DELETE FROM h_dependencies WHERE consumer_id=? AND producer_id=? AND sensitivity='privacy'").run(value.id, reference.messageId);
+      for (const reference of value.referenceContexts || []) this.addDependency(handle, {
+        consumerId: value.id, producerId: reference.messageId, producerRevision: 0, sensitivity: 'privacy', invalidation: 'block',
+      });
+      this.db.prepare('DELETE FROM h_assertion_evidence WHERE assertion_id=?').run(value.id);
+      for (const id of value.evidenceIds) {
+        const selected = locators.filter(locator => locator.eventId === id && locator.role !== 'authorization');
+        const citations: AssertionCitation[] = selected.length ? selected.map(locator => ({ ...locator,
+          contentVersion: locator.contentVersion ?? this.evidence(handle, id)!.contentVersion, role: locator.role || 'primary' }))
+          : previousLocators.filter(locator => locator.eventId === id && locator.role !== 'authorization');
+        if (!citations.length) citations.push({ eventId: id, role: value.evidenceIds[0] === id ? 'primary' : 'support' });
+        for (const citation of citations) this.storeCitation(value.id, value.revision, citation);
+        const single = citations.length === 1 ? citations[0] : undefined;
+        this.db
+          .prepare('INSERT INTO h_assertion_evidence VALUES(?,?,?,?)')
+          .run(
+            value.id,
+            id,
+            single?.start ?? null,
+            single?.end ?? null,
+          );
+      }
+      const authorizations = locators.filter(locator => locator.role === 'authorization');
+      for (const locator of authorizations.length ? authorizations : previousLocators.filter(locator => locator.role === 'authorization')) {
+        if (!this.evidence(handle, locator.eventId)) throw new HarnessError('evidence_forbidden', "The source of retention permission is unreadable.");
+        this.storeCitation(value.id, value.revision, { ...locator, role: 'authorization' });
+      }
+      this.replaceIndex('assertion', value.id, value.text);
+      this.outbox('assertion_changed', value.id);
+      this.transitions.push({
+        at: this.clock.now(),
+        objectId: value.id,
+        from: old ? String(old.status) : undefined,
+        to: value.status,
+        revision: value.revision,
+      });
+    });
+  }
+  operation<T>(id: string): T | undefined {
+    const row = this.db.prepare('SELECT result FROM h_operations WHERE id=?').get(id);
+    return row ? JSON.parse(String(row.result)) : undefined;
+  }
+  completeOperation(id: string, kind: string, result: unknown) {
+    this.db.prepare('INSERT INTO h_operations VALUES(?,?,?)').run(id, kind, JSON.stringify(result));
+  }
+  outbox(kind: string, objectId: string) {
+    this.db
+      .prepare('INSERT INTO h_outbox VALUES(?,?,?,?,?,?)')
+      .run(randomUUID(), kind, objectId, this.epoch, 'pending', this.clock.now());
+  }
+  pending(kind: string) {
+    return this.db
+      .prepare(
+        "SELECT * FROM h_outbox WHERE kind=? AND status='pending' AND epoch=? ORDER BY rowid LIMIT 100",
+      )
+      .all(kind, this.epoch);
+  }
+  private workSourceGrant(sourceId: string) {
+    return sourceId === 'map:local' ? 'map:read' : sourceId === 'weather:open-meteo' ? 'weather:read'
+      : sourceId === 'profile:self' ? 'memory:read' : sourceId.startsWith('campus:') ? 'campus:read' : 'evidence:read';
+  }
+  private permittedWorkSource(handle: ScopeHandle, ref: WorkSourceRef) {
+    const f = this.filter(handle);
+    // This is a permission check, not source delivery. In particular, a list's
+    // metadata prefilter must not log every candidate as provided to a model.
+    const event = parse<EvidenceEvent>(this.db.prepare(`SELECT r.payload FROM h_evidence r WHERE ${f.sql} AND r.id=? AND r.status!='deleted'`)
+      .get(...f.params, ref.eventId));
+    const scope = this.scope(handle);
+    if (!event || event.contentVersion !== ref.contentVersion || event.label.retention !== 'purpose_scoped'
+      || !scope.grants.includes('evidence:read') || !scope.grants.includes(this.workSourceGrant(event.sourceId))
+      || ref.end > Array.from(event.text).length || !this.availableInferenceRanges(event).some(range => range.start <= ref.start && range.end >= ref.end))
+      throw new HarnessError('work_source_unavailable', "The matter's original passage changed or is outside the current scope.");
+    return event;
+  }
+  resolveWorkSourceBinding(handle: ScopeHandle, raw: WorkSourceRef[]): WorkSourceBinding {
+    if (!Array.isArray(raw) || !raw.length || raw.length > 32) throw new HarnessError('work_sources_required', "A specific original passage for the matter is required.");
+    const unique = new Map<string, WorkSourceRef>();
+    for (const value of raw) { const ref = workSourceRefSchema.parse(value); unique.set(canonical(ref), ref); }
+    const refs = [...unique].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, value]) => value);
+    const events = refs.map(ref => this.permittedWorkSource(handle, ref));
+    return { version: 1, refs, sourceIds: [...new Set(events.map(event => event.sourceId))].sort(),
+      requiredGrants: [...new Set(['evidence:read', ...events.map(event => this.workSourceGrant(event.sourceId))])].sort() };
+  }
+  private workBindingReadable(handle: ScopeHandle, raw: unknown) {
+    try {
+      const binding = workSourceBindingSchema.parse(raw);
+      return canonical(binding) === canonical(this.resolveWorkSourceBinding(handle, binding.refs));
+    } catch (error) {
+      if (error instanceof HarnessError || error instanceof Error && error.name === 'ZodError') return false;
+      throw error;
+    }
+  }
+  workBindingsReadable(handle: ScopeHandle, raw: unknown): boolean {
+    if (!Array.isArray(raw)) return false;
+    const scope = this.scope(handle);
+    if (raw.length && (scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || !scope.grants.includes('evidence:read'))) return false;
+    return raw.every(binding => this.workBindingReadable(handle, binding));
+  }
+  planningActionReadable(handle: ScopeHandle, actionId: string) {
+    const action = this.db.prepare("SELECT json_extract(payload,'$.reason') AS reason FROM h_actions WHERE id=?").get(actionId);
+    if (action?.reason === 'planning_source_deleted_details_removed') return false;
+    const rows = this.db.prepare(`SELECT a.source_binding,a.redacted FROM h_planning_intent_attempts a
+      JOIN h_planning_intent_action_links l ON l.plan_id=a.plan_id WHERE l.action_id=?`).all(actionId);
+    if (!rows.length) return true;
+    // An actually accepted current calendar object is an independent business
+    // record. The exception conveys no authority to retry the old proposal.
+    const scope = this.scope(handle);
+    if (scope.principalId === scope.subjectId && scope.worldId === 'real' && scope.audience === 'self'
+      && scope.sources.includes('local-agenda') && this.confirmedAgendaReferences().some(item => item.actionId === actionId)) return true;
+    return rows.every(row => {
+      if (Number(row.redacted) !== 0 || typeof row.source_binding !== 'string') return false;
+      try { return this.workBindingReadable(handle, JSON.parse(row.source_binding)); }
+      catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+    });
+  }
+  historicalAssertionsReadable(handle: ScopeHandle, raw: unknown, localDisplay = false) {
+    this.scope(handle);
+    if (!Array.isArray(raw)) return false;
+    if (raw.length && !this.understandingReceiptReadable(handle, localDisplay)) return false;
+    return raw.every(ref => ref && typeof ref === 'object' && typeof ref.id === 'string'
+      && Number.isSafeInteger(ref.revision) && ref.revision > 0 && !!this.assertionHistoryVersion(handle, ref.id, ref.revision));
+  }
+  /** Metadata-only gate for source-bound planning and historical understanding text. */
+  planningMessageReadable(handle: ScopeHandle, value: { contextReceipt?: { providedSourceIds?: unknown; providedObjectVersions?: unknown; imageRequests?: unknown; planningProvenance?: unknown; historicalAssertionVersions?: unknown; learningProcessVersions?: unknown; workSourceBindings?: unknown; reflectiveLetterSources?: unknown; assistantWorkSources?: unknown; assistantTextSources?: unknown; personalMethodSources?: unknown; noteSources?: unknown; workoutSources?: unknown; materialNavigationSources?: unknown; spatialSources?: unknown; campusSensitiveReads?: unknown; campusReadingAddresses?: unknown; campusReadingProofs?: unknown; campusReadingSources?: unknown; campusReadingIncomplete?: unknown; interactiveProgramSources?: unknown; toolAttempts?: unknown; releaseSources?: unknown }; scenes?: unknown; releaseArtifacts?: unknown; legacyRelease?: boolean },
+    proofs: AssistantWorkProofState = { checked: new Map() }) {
+    if ((value.releaseArtifacts !== undefined || value.legacyRelease)
+      && this.verifyReleaseMessage?.(handle, value.releaseArtifacts, value.contextReceipt, !!value.legacyRelease, proofs) !== true) return false;
+    if (value.contextReceipt?.releaseSources !== undefined
+      && this.verifyReleaseSources?.(handle, value.contextReceipt.releaseSources, false, proofs) !== true) return false;
+    if (!this.materialNavigationSourcesReadable(handle, value.contextReceipt?.materialNavigationSources)) return false;
+    if (!this.spatialSourcesReadable(handle, value.contextReceipt?.spatialSources)) return false;
+    if (!this.workoutSourcesReadable(handle, value.contextReceipt?.workoutSources)) return false;
+    if (value.contextReceipt?.workoutSources === undefined && Array.isArray(value.contextReceipt?.toolAttempts)
+      && value.contextReceipt.toolAttempts.some(attempt => attempt && typeof attempt === 'object' && attempt.capability === 'workout.current')) return false;
+    if (value.contextReceipt?.providedObjectVersions !== undefined
+      && (!Array.isArray(value.contextReceipt.providedObjectVersions)
+        || !this.assertionReferenceVersionsReadable(handle, value.contextReceipt.providedObjectVersions, proofs.localDisplay))) return false;
+    try { if (!this.imageSourceVersionsReadable(handle, providedImageVersions(value.contextReceipt || {}))) return false; }
+    catch (error) { if (error instanceof HarnessError) return false; throw error; }
+    if (value.contextReceipt?.campusSensitiveReads === undefined && Array.isArray(value.contextReceipt?.toolAttempts)
+      && value.contextReceipt.toolAttempts.some(attempt => attempt && typeof attempt === 'object' && ['campus.query', 'campus.lookup', 'campus.imported_lookup'].includes(attempt.capability))) {
+      // Older receipts cannot prove whether that generic campus call used a
+      // temporary sensitive purpose. Do not invent a retrospective model grant.
+      const scope = this.scope(handle), revoked = this.getMeta<string[]>('revoked', []);
+      if (!proofs.localDisplay || !scope.grants.includes('campus:read') || revoked.some(grant => ['campus:read', 'campus:grades:read', 'campus:gpa:read'].includes(grant))) return false;
+    }
+    if (value.contextReceipt?.campusSensitiveReads !== undefined
+      && this.verifyCampusSensitiveReads?.(handle, value.contextReceipt.campusSensitiveReads, proofs.localDisplay) !== true) return false;
+    if (value.contextReceipt?.campusReadingIncomplete && !proofs.localDisplay) return false;
+    if (value.contextReceipt?.campusReadingAddresses !== undefined || value.contextReceipt?.campusReadingProofs !== undefined || value.contextReceipt?.campusReadingSources !== undefined) {
+      const addresses = value.contextReceipt.campusReadingAddresses;
+      const snapshots = value.contextReceipt.campusReadingProofs !== undefined ? value.contextReceipt.campusReadingProofs
+        : addresses === undefined ? [] : Array.isArray(addresses) && addresses.length <= 6
+          ? addresses.map(address => address && typeof address === 'object' ? address.snapshot : null) : null;
+      const sources = value.contextReceipt?.campusReadingSources;
+      if (this.verifyCampusReadingProofs?.(handle, snapshots) !== true
+        || sources !== undefined && this.verifyCampusReadingProofs?.(handle, sources) !== true) return false;
+    } else if (!proofs.localDisplay && Array.isArray(value.contextReceipt?.providedSourceIds)
+      && value.contextReceipt.providedSourceIds.includes('campus:academic-account')) {
+      // A published Scene may be a copy of an earlier Scene. Neither its
+      // bundle nor the old invocation count binds every adopted body in this
+      // reply to the current account; do not retroactively issue that proof.
+      return false;
+    }
+    if (value.contextReceipt?.noteSources !== undefined && !this.noteSourcesReadable(handle, value.contextReceipt.noteSources)) return false;
+    if (value.contextReceipt?.interactiveProgramSources !== undefined
+      && this.verifyInteractiveProgramSources?.(handle, value.contextReceipt.interactiveProgramSources, proofs.localDisplay) !== true) return false;
+    if (Array.isArray(value.scenes) && value.scenes.some(scene => scene?.kind === 'note' && !this.noteSourcesReadable(handle, [scene.proof]))) return false;
+    if (value.contextReceipt?.personalMethodSources !== undefined
+      && (!Array.isArray(value.contextReceipt.personalMethodSources)
+        || !value.contextReceipt.personalMethodSources.every(source => this.verifyPersonalMethodSources?.(handle, source) === true))) return false;
+    if (value.contextReceipt?.assistantWorkSources !== undefined
+      && !this.assistantWorkSourcesReadable(handle, value.contextReceipt.assistantWorkSources, proofs)) return false;
+    if (!this.assistantTextSourcesReadable(handle, value.contextReceipt?.assistantTextSources, proofs)) return false;
+    if (value.contextReceipt?.workSourceBindings !== undefined
+      && !this.workBindingsReadable(handle, value.contextReceipt.workSourceBindings)) return false;
+    if (value.contextReceipt?.historicalAssertionVersions !== undefined
+      && !this.historicalAssertionsReadable(handle, value.contextReceipt.historicalAssertionVersions, proofs.localDisplay)) return false;
+    if (value.contextReceipt?.learningProcessVersions !== undefined) {
+      const refs = value.contextReceipt.learningProcessVersions;
+      if (!Array.isArray(refs) || !refs.every(ref => ref && typeof ref === 'object' && typeof ref.id === 'string'
+        && Number.isSafeInteger(ref.revision) && ref.revision > 0 && (this.learningProcessReadable(handle, ref.id, ref.revision)
+          || (Array.isArray(value.scenes) ? value.scenes : []).some(scene => scene?.kind === 'discussion'
+            && Array.isArray(scene.coWork) && scene.coWork.some((projection: CompanionSceneProjection) => projection.snapshotProof?.learningProcessRefs
+              .some(linked => linked.id === ref.id && linked.revision === ref.revision)
+              && this.verifyCompanionSnapshotMetadata?.(handle, projection, proofs.permits) === true))))) return false;
+    }
+    if (value.contextReceipt?.reflectiveLetterSources !== undefined) {
+      const metadata = value.contextReceipt.reflectiveLetterSources;
+      if (!Array.isArray(metadata) || !metadata.every(value => {
+        const parsed = reflectiveLetterMetadataSchema.safeParse(value);
+        if (!parsed.success || !this.verifyReflectiveLetterSources) return false;
+        try { return this.verifyReflectiveLetterSources(handle, parsed.data) === true; }
+        catch (error) { if (error instanceof HarnessError) return false; throw error; }
+      })) return false;
+    }
+    if (value.contextReceipt?.planningProvenance !== undefined && !this.planningMaterialReadable(handle, value.contextReceipt.planningProvenance, { requireCurrentIntent: false })) return false;
+    for (const scene of Array.isArray(value.scenes) ? value.scenes : []) {
+      if (scene?.kind === 'curiosity' || scene?.kind === 'map' && scene.storySetting) {
+        const provenance = scene.kind === 'map' ? scene.storySetting : scene.provenance;
+        const binding = workSourceBindingSchema.safeParse(provenance?.sourceBinding);
+        if (!this.scope(handle).sources.includes('work:self') || !binding.success
+          || binding.data.refs.some(ref => proofs.permits?.(ref) === false) || !this.workBindingReadable(handle, binding.data)
+          || (scene.kind === 'map' || provenance?.noteSources !== undefined) && !this.noteSourcesReadable(handle, provenance?.noteSources)
+          || provenance?.assistantWorkSources !== undefined
+            && !this.assistantWorkSourcesReadable(handle, provenance.assistantWorkSources, proofs)) return false;
+      }
+      if (scene?.kind === 'discussion' && scene.coWork !== undefined) {
+        const binding = workSourceBindingSchema.safeParse(scene.provenance?.sourceBinding);
+        if (!Array.isArray(scene.coWork) || scene.coWork.length > 8 || !binding.success
+          || !this.workBindingsReadable(handle, [binding.data]) || binding.data.refs.some(ref => proofs.permits?.(ref) === false)
+          || this.verifyDiscussionSnapshotMetadata?.(handle, { sessionId: scene.sessionId, matter: scene.matter,
+            createdAt: scene.createdAt, sourceBinding: binding.data }, proofs.permits) !== true
+          || scene.coWork.some((projection: CompanionSceneProjection) => this.verifyCompanionSnapshotMetadata?.(handle, projection, proofs.permits) !== true)) return false;
+      }
+      if (scene?.kind !== 'planning' || !scene.continuation) continue;
+      const continuation = scene.continuation;
+      if (!this.planningMaterialReadable(handle, [{ intentId: continuation.intentId, intentRevision: continuation.intentRevision,
+        sourceBinding: continuation.sourceBinding, attemptBasis: continuation.attemptBasis }], { requireCurrentIntent: false })) return false;
+    }
+    return true;
+  }
+  /** One synchronous traversal shares only call-local results. A cycle or an
+   * unavailable original chapter never becomes permission for a later copy. */
+  assistantWorkSourcesReadable(handle: ScopeHandle, raw: unknown, proofs: AssistantWorkProofState = { checked: new Map() }): boolean {
+    if (!Array.isArray(raw) || raw.length > 128) return false;
+    return raw.every(value => {
+      const parsed = assistantWorkSourceSchema.safeParse(value);
+      if (!parsed.success) return false;
+      const source = parsed.data, key = canonical(source), previous = proofs.checked.get(key);
+      if (previous !== undefined) return previous === true;
+      proofs.checked.set(key, 'checking');
+      const available = this.assistantHistoricalWorks(handle, { ...source, ...(proofs.sessionId ? { sessionId: proofs.sessionId } : {}), limit: 1 }, proofs).length === 1
+        || !!this.assistantCoWorkScene(handle, source, { sessionId: proofs.sessionId, permits: proofs.permits }, proofs);
+      proofs.checked.set(key, available);
+      return available;
+    });
+  }
+  /** Keep direct dependency roots, not a growing list of their ancestors.
+   * Every address is first checked at the current scope. Coverage follows only
+   * original exact scene declarations, never a coarse message dependency or
+   * prose similarity. It claims no new body read or acknowledgement. */
+  compactAssistantWorkSources(handle: ScopeHandle, raw: AssistantWorkSource[]): AssistantWorkSource[] {
+    const sources = [...new Map(raw.map(value => {
+      const source = assistantWorkSourceSchema.parse(value); return [canonical(source), source] as const;
+    })).values()], proofs: AssistantWorkProofState = { checked: new Map() };
+    if (!sources.every(source => this.assistantWorkSourcesReadable(handle, [source], proofs)))
+      throw new HarnessError('curiosity_history_changed', "An original chapter source changed. A new chapter address was not used to bypass it.");
+    const keys = new Set(sources.map(canonical)), covered = new Set<string>(), cache = new Map<string, AssistantWorkSource[]>();
+    const children = (source: AssistantWorkSource) => {
+      const key = canonical(source), existing = cache.get(key);
+      if (existing) return existing;
+      const row = this.db.prepare(`SELECT json_extract(m.payload,'$.contextReceipt.assistantWorkSources') AS receipt_sources,
+        json_type(m.payload,'$.contextReceipt.assistantWorkSources') AS receipt_type,
+        json_extract(s.value,'$.provenance.assistantWorkSources') AS scene_sources,
+        json_type(s.value,'$.provenance.assistantWorkSources') AS scene_type
+        FROM messages m,json_each(m.payload,'$.scenes') s WHERE m.id=? AND json_extract(s.value,'$.id')=?
+        AND json_extract(s.value,'$.revision')=? LIMIT 1`).get(source.messageId, source.sceneId, source.sceneRevision);
+      if (!row) throw new HarnessError('curiosity_history_changed', "The original chapter changed after verification. Its dependencies were not omitted.");
+      const declared = (value: unknown, type: unknown): AssistantWorkSource[] => {
+        if (type === null) return [];
+        let parsed: unknown;
+        try { parsed = JSON.parse(String(value)); } catch { throw new HarnessError('curiosity_history_changed', "The original chapter dependency address is incomplete."); }
+        if (!Array.isArray(parsed)) throw new HarnessError('curiosity_history_changed', "The original chapter dependency address is incomplete.");
+        return parsed.map(value => assistantWorkSourceSchema.parse(value));
+      };
+      const result = [...new Map([...declared(row.receipt_sources, row.receipt_type), ...declared(row.scene_sources, row.scene_type)]
+        .map(value => [canonical(value), value])).values()];
+      cache.set(key, result); return result;
+    };
+    for (const source of sources) {
+      const seen = new Set([canonical(source)]), pending = [...children(source)];
+      while (pending.length) {
+        const next = pending.pop()!, key = canonical(next);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (keys.has(key)) covered.add(key);
+        pending.push(...children(next));
+      }
+    }
+    const roots = sources.filter(source => !covered.has(canonical(source)));
+    if (roots.length > 128) throw new HarnessError('assistant_work_sources_budget', "This turn has too many truly independent work sources. Adopt the relevant chapters now; other originals were not truncated.");
+    return roots;
+  }
+  planningMaterialReadable(handle: ScopeHandle, raw: unknown, options: { requireCurrentIntent?: boolean } = {}) {
+    if (!Array.isArray(raw)) return false;
+    try {
+      const scope = this.scope(handle);
+      if (scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+        || !scope.sources.includes('work:self') || !scope.grants.includes('evidence:read')) return raw.length === 0;
+      const f = this.filter(handle);
+      return raw.every(value => {
+        const provenance = planningMaterialProvenanceSchema.parse(value);
+        if (new Set(provenance.attemptBasis.map(attempt => attempt.planId)).size !== provenance.attemptBasis.length
+          || provenance.attemptBasis.some(attempt => attempt.intentId !== provenance.intentId)) return false;
+        const row = this.db.prepare(`SELECT r.revision,r.status,json_extract(r.payload,'$.data.type') AS type,
+          json_extract(r.payload,'$.sourceBinding') AS binding FROM h_work r WHERE ${f.sql} AND r.id=?`)
+          .get(...f.params, provenance.intentId);
+        if (!row || row.type !== 'planning_intent'
+          || options.requireCurrentIntent !== false && (Number(row.revision) !== provenance.intentRevision || row.status !== 'active'
+            || typeof row.binding !== 'string' || canonical(JSON.parse(row.binding)) !== canonical(provenance.sourceBinding))
+          || !this.workBindingReadable(handle, provenance.sourceBinding) || !this.verifyPlanningAttemptBasis) return false;
+        this.verifyPlanningAttemptBasis(handle, provenance.intentId, provenance.attemptBasis);
+        return true;
+      });
+    } catch (error) {
+      if (error instanceof HarnessError || error instanceof SyntaxError || error instanceof Error && error.name === 'ZodError') return false;
+      throw error;
+    }
+  }
+  private planningMaterialFilter(handle: ScopeHandle, alias: string) {
+    const scope = this.scope(handle), denied: string[] = [];
+    const legacy = `(EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.artifact.scenes') scene
+        WHERE json_extract(scene.value,'$.kind')='planning' AND json_type(scene.value,'$.continuation')='object')
+      OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.material') material
+        WHERE json_extract(material.value,'$.tool') IN ('planning.replan','planning_intent')
+          OR EXISTS(SELECT 1 FROM json_each(material.value,'$.versions') version JOIN h_work intent
+            ON intent.id=json_extract(version.value,'$.id') WHERE json_extract(version.value,'$.kind')='work'
+            AND json_extract(intent.payload,'$.data.type')='planning_intent'))
+      OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.resultRefs') ref JOIN h_work prepared ON prepared.id=ref.value
+        JOIN json_each(prepared.payload,'$.data.artifact.scenes') scene
+        WHERE json_extract(scene.value,'$.kind')='planning' AND json_type(scene.value,'$.continuation')='object'))`;
+    const rows = this.db.prepare(`SELECT r.id,json_extract(r.payload,'$.data.planningProvenance') AS provenance,
+      json_extract(r.payload,'$.data.materialPlanningContractVersion') AS contract
+      FROM h_work r WHERE r.owner=? AND r.workspace=? AND (json_type(r.payload,'$.data.planningProvenance') IS NOT NULL OR ${legacy})`)
+      .all(scope.principalId, scope.workspaceId);
+    for (const row of rows) {
+      try {
+        if (Number(row.contract) !== 1 || typeof row.provenance !== 'string' || !this.planningMaterialReadable(handle, JSON.parse(row.provenance)))
+          denied.push(String(row.id));
+      } catch (error) { if (error instanceof SyntaxError) denied.push(String(row.id)); else throw error; }
+    }
+    return { sql: `${alias}.id NOT IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(denied)] };
+  }
+  /** Candidate metadata only; the returned SQL gate applies before matching,
+   * counting or paging any protected title/specification. */
+  private workSourceFilter(handle: ScopeHandle, alias = 'r') {
+    const scope = this.scope(handle), allowed: string[] = [], derivedAllowed: string[] = [], planning = this.planningMaterialFilter(handle, alias);
+    const letters = this.reflectiveLetterSourceFilter(handle, alias), notes = this.noteMaterialFilter(handle, alias),
+      workouts = this.workoutSourceFilter(handle, alias),
+      materialNavigation = this.materialNavigationSourceFilter(handle, alias), spatial = this.spatialSourceFilter(handle, alias);
+    for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.sourceBinding') AS binding,
+      json_extract(payload,'$.data.methodSources') AS method_sources,json_extract(payload,'$.data.type') AS type,
+      json_type(payload,'$.data.curiosityInvitation') AS curiosity,json_extract(payload,'$.data.assistantWorkSources') AS assistant_sources,revision FROM h_work
+      WHERE owner=? AND workspace=? AND json_type(payload,'$.sourceBinding') IS NOT NULL`).all(scope.principalId, scope.workspaceId)) {
+      if (row.type === 'companion_session' || row.type === 'study_companion' || row.type === 'relationship_rehearsal') continue;
+      if (row.type === 'personal_method' && row.method_sources !== null) {
+        try { if (!this.verifyPersonalMethodSources?.(handle, JSON.parse(String(row.method_sources)))) continue; }
+        catch (error) { if (error instanceof SyntaxError || error instanceof HarnessError) continue; throw error; }
+      }
+      if ((row.type === 'curiosity_invitation' || row.type === 'collaboration_frame' && row.curiosity === 'true') && row.assistant_sources !== null) {
+        try { if (!this.assistantWorkSourcesReadable(handle, JSON.parse(String(row.assistant_sources)))) continue; }
+        catch (error) { if (error instanceof SyntaxError || error instanceof HarnessError) continue; throw error; }
+      }
+      try { if (this.workBindingReadable(handle, JSON.parse(String(row.binding)))
+        && (row.type !== 'learning_process' || this.learningProcessReadable(handle, String(row.id), Number(row.revision)))) allowed.push(String(row.id)); }
+      catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+    }
+    for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.personalMethodSources') AS sources FROM h_work
+      WHERE owner=? AND workspace=? AND json_type(payload,'$.personalMethodSources') IS NOT NULL`).all(scope.principalId, scope.workspaceId)) {
+      try {
+        const sources: unknown = JSON.parse(String(row.sources));
+        if (Array.isArray(sources) && sources.every(source => this.verifyPersonalMethodSources?.(handle, source) === true)) derivedAllowed.push(String(row.id));
+      } catch (error) { if (error instanceof SyntaxError || error instanceof HarnessError) continue; throw error; }
+    }
+    return { sql: `((json_type(${alias}.payload,'$.sourceBinding') IS NULL AND COALESCE(json_extract(${alias}.payload,'$.data.type'),'')!='planning_intent')
+      OR ${alias}.id IN (SELECT value FROM json_each(?)))
+      AND COALESCE(json_extract(${alias}.payload,'$.data.type'),'') NOT IN ('companion_session','study_companion','relationship_rehearsal')
+      AND COALESCE(json_extract(${alias}.payload,'$.data.type'),'') NOT IN ('spatial_role','spatial_alias','spatial_crosswalk')
+      AND (COALESCE(json_extract(${alias}.payload,'$.data.type'),'')!='personal_method' OR json_type(${alias}.payload,'$.sourceBinding')='object')
+      AND NOT (COALESCE(json_extract(${alias}.payload,'$.data.type'),'')='collaboration_frame'
+        AND COALESCE(json_type(${alias}.payload,'$.data.companion'),'null')!='null')
+      AND (json_type(${alias}.payload,'$.personalMethodSources') IS NULL OR ${alias}.id IN (SELECT value FROM json_each(?)))
+      AND ${planning.sql} AND ${letters.sql} AND ${notes.sql} AND ${workouts.sql} AND ${materialNavigation.sql} AND ${spatial.sql}`,
+      params: [JSON.stringify(allowed), JSON.stringify(derivedAllowed), ...planning.params, ...letters.params, ...notes.params, ...workouts.params, ...materialNavigation.params, ...spatial.params] };
+  }
+  /** A copied workout summary keeps its original permission and withdrawal
+   * address before titles, search matches, counts or exports can reveal it. */
+  private workoutSourceFilter(handle: ScopeHandle, alias: string) {
+    const scope = this.scope(handle), denied: string[] = [];
+    for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.data.workoutSources') AS sources,
+      json_type(payload,'$.data.workoutSources') AS sources_type FROM h_work
+      WHERE owner=? AND workspace=? AND json_type(payload,'$.data.workoutSources') IS NOT NULL`)
+      .all(scope.principalId, scope.workspaceId)) {
+      try {
+        if (row.sources_type !== 'array' || !this.workoutSourcesReadable(handle, JSON.parse(String(row.sources))))
+          denied.push(String(row.id));
+      } catch (error) { if (error instanceof SyntaxError) denied.push(String(row.id)); else throw error; }
+    }
+    return { sql: `${alias}.id NOT IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(denied)] };
+  }
+  private spatialSourceFilter(handle: ScopeHandle, alias: string) {
+    const scope = this.scope(handle), denied: string[] = [];
+    for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.data.spatialSources') AS sources
+      FROM h_work WHERE owner=? AND workspace=? AND json_type(payload,'$.data.spatialSources') IS NOT NULL`)
+      .all(scope.principalId, scope.workspaceId)) {
+      try { if (!this.spatialSourcesReadable(handle, JSON.parse(String(row.sources)))) denied.push(String(row.id)); }
+      catch (error) { if (error instanceof SyntaxError) denied.push(String(row.id)); else throw error; }
+    }
+    return { sql: `${alias}.id NOT IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(denied)] };
+  }
+  /** Check opaque navigation provenance before a Work title, body, count or
+   * export can expose words derived from an unavailable material address. */
+  private materialNavigationSourceFilter(handle: ScopeHandle, alias: string) {
+    const scope = this.scope(handle), denied: string[] = [];
+    const rows = this.db.prepare(`SELECT id,json_extract(payload,'$.data.materialNavigationSources') AS sources
+      FROM h_work WHERE owner=? AND workspace=? AND json_type(payload,'$.data.materialNavigationSources') IS NOT NULL`)
+      .all(scope.principalId, scope.workspaceId);
+    for (const row of rows) {
+      try {
+        if (!this.materialNavigationSourcesReadable(handle, JSON.parse(String(row.sources)))) denied.push(String(row.id));
+      } catch (error) { if (error instanceof SyntaxError) denied.push(String(row.id)); else throw error; }
+    }
+    return { sql: `${alias}.id NOT IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(denied)] };
+  }
+  /** Original address/version proof only; the material owner keeps the
+   * current source, submission and receipt checks. No body is selected here. */
+  materialNavigationSourcesReadable(handle: ScopeHandle, raw: unknown): boolean {
+    this.scope(handle);
+    if (raw === undefined) return true;
+    if (!Array.isArray(raw) || raw.some(proof => !materialNavigationProofSchema.safeParse(proof).success)) return false;
+    return !raw.length || this.verifyMaterialNavigationSources?.(handle, raw) === true;
+  }
+  workMaterialNavigationSources(handle: ScopeHandle, records: Pick<WorkRecord, 'id' | 'revision'>[]): MaterialNavigationProof[] {
+    const scope = this.scope(handle), sources: MaterialNavigationProof[] = [];
+    for (const record of records) {
+      const row = this.db.prepare(`SELECT json_extract(payload,'$.data.materialNavigationSources') AS sources,
+        json_type(payload,'$.data.materialNavigationSources') AS sources_type FROM h_work
+        WHERE id=? AND revision=? AND owner=? AND workspace=?`).get(record.id, record.revision, scope.principalId, scope.workspaceId);
+      if (!row || row.sources_type === null) continue;
+      if (row.sources_type !== 'array')
+        throw new HarnessError('material_navigation_changed', "This matter's material-address proof is incomplete. Return to currently permitted sources.");
+      const raw: unknown = JSON.parse(String(row.sources));
+      if (!this.materialNavigationSourcesReadable(handle, raw))
+        throw new HarnessError('material_navigation_changed', "A material address used by this matter changed. Return to currently permitted sources.");
+      sources.push(...(raw as unknown[]).map(value => materialNavigationProofSchema.parse(value)));
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  /** A notebook-derived title or explanation needs the same original range
+   * as its prepared body. Read only proof metadata before any Work search,
+   * count or page can disclose the derived words. */
+  private noteMaterialFilter(handle: ScopeHandle, alias: string) {
+    const scope = this.scope(handle), denied: string[] = [];
+    const rows = this.db.prepare(`SELECT r.id,json_extract(r.payload,'$.data.noteSources') AS proofs,
+      json_extract(r.payload,'$.data.materialNoteContractVersion') AS contract FROM h_work r
+      WHERE r.owner=? AND r.workspace=? AND json_extract(r.payload,'$.data.type') IN ('help_opportunity','cooperation_record','curiosity_invitation')
+      AND (json_type(r.payload,'$.data.noteSources') IS NOT NULL
+        OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sourceIds') source WHERE source.value='notes:self')
+        OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.material') material WHERE json_extract(material.value,'$.tool')='manage_note'
+          OR json_type(material.value,'$.noteId')='text' OR json_extract(material.value,'$.sourceId')='notes:self'
+          OR EXISTS(SELECT 1 FROM json_each(material.value,'$.sourceIds') source WHERE source.value='notes:self'))
+        OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.artifact.scenes') scene WHERE json_extract(scene.value,'$.kind')='note'))`)
+      .all(scope.principalId, scope.workspaceId);
+    for (const row of rows) {
+      try {
+        if (row.contract !== 1 || typeof row.proofs !== 'string' || !this.noteSourcesReadable(handle, JSON.parse(row.proofs)))
+          denied.push(String(row.id));
+      } catch (error) { if (error instanceof SyntaxError) denied.push(String(row.id)); else throw error; }
+    }
+    return { sql: `${alias}.id NOT IN (SELECT value FROM json_each(?))`, params: [JSON.stringify(denied)] };
+  }
+  /** Optional owner hook. It receives addresses and versions, never letter
+   * paragraphs; the owner must not recursively call generic Work readers. */
+  verifyReflectiveLetterSources?: (handle: ScopeHandle, metadata: { binding: unknown; request: unknown; proofs: unknown }) => boolean;
+  /** Only source addresses/digests from the procedural owner; never method
+   * instructions. The callback must not recursively read personal methods. */
+  verifyPersonalMethodSources?: (handle: ScopeHandle, metadata: unknown) => boolean;
+  verifyInteractiveProgramSources?: (handle: ScopeHandle, metadata: unknown, localDisplay?: boolean) => boolean;
+  verifyCampusReadingProofs?: (handle: ScopeHandle, metadata: unknown) => boolean;
+  verifyMaterialNavigationSources?: (handle: ScopeHandle, metadata: unknown) => boolean;
+  verifySpatialSources?: (handle: ScopeHandle, metadata: unknown) => boolean;
+
+  private reflectiveLetterSourceFilter(handle: ScopeHandle, alias: string) {
+    const scope = this.scope(handle), allowed: string[] = [];
+    const rows = this.db.prepare(`SELECT id,json_extract(payload,'$.data.reflectiveLetterBinding') AS binding,
+      json_extract(payload,'$.data.reflectiveLetterProvenance.request') AS request,
+      json_extract(payload,'$.data.reflectiveLetterProvenance.proofs') AS proofs FROM h_work
+      WHERE owner=? AND workspace=? AND (json_type(payload,'$.data.reflectiveLetterBinding') IS NOT NULL
+        OR json_type(payload,'$.data.reflectiveLetter') IS NOT NULL OR json_type(payload,'$.data.reflectiveLetterProvenance') IS NOT NULL)`)
+      .all(scope.principalId, scope.workspaceId);
+    for (const row of rows) {
+      if (this.hasFence(String(row.id)) || !this.verifyReflectiveLetterSources) continue;
+      try {
+        if (this.verifyReflectiveLetterSources(handle, { binding: row.binding ? JSON.parse(String(row.binding)) : null,
+          request: row.request ? JSON.parse(String(row.request)) : null, proofs: row.proofs ? JSON.parse(String(row.proofs)) : [] })) allowed.push(String(row.id));
+      } catch (error) {
+        if (!(error instanceof HarnessError) && !(error instanceof SyntaxError)) throw error;
+      }
+    }
+    return { sql: `((json_type(${alias}.payload,'$.data.reflectiveLetterBinding') IS NULL
+      AND json_type(${alias}.payload,'$.data.reflectiveLetter') IS NULL
+      AND json_type(${alias}.payload,'$.data.reflectiveLetterProvenance') IS NULL)
+      OR ${alias}.id IN (SELECT value FROM json_each(?)))`, params: [JSON.stringify(allowed)] };
+  }
+  /** Host-only candidates for the source-bound conversational owners.
+   * This is not a generic tool result or permission to display the payload.
+   * Each owner must still check its own material/reply/learning state before
+   * returning a projection. No callback into those readers occurs here. */
+  workArtifactRecords(handle: ScopeHandle, artifactType: 'companion_session' | 'study_companion' | 'companion_continuity' | 'relationship_rehearsal',
+    options: { id?: string; matterId?: string; sessionId?: string; offset?: number; limit?: number } = {}): WorkRecord[] {
+    const scope = this.scope(handle), offset = options.offset ?? 0, limit = options.limit ?? 20;
+    if (scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || !scope.sources.includes('work:self') || !scope.grants.includes('evidence:read'))
+      throw new HarnessError('work_artifact_scope', "The current scope cannot read this shared work or relationship material.");
+    if (!['companion_session', 'study_companion', 'companion_continuity', 'relationship_rehearsal'].includes(artifactType)
+      || !Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100
+      || [options.id, options.matterId, options.sessionId].some(value => value !== undefined && (typeof value !== 'string' || !value || value.length > 160)))
+      throw new HarnessError('invalid_page', "The shared-work reading address or range is invalid.");
+    const f = this.filter(handle), e = this.filter(handle, 'e');
+    const type = artifactType === 'companion_continuity'
+      ? "r.kind='episode' AND json_extract(r.payload,'$.data.type')='collaboration_frame' AND json_type(r.payload,'$.data.companion')='object'"
+      : `json_extract(r.payload,'$.data.type')='${artifactType}'`;
+    const candidates = this.db.prepare(`SELECT r.id,json_extract(r.payload,'$.sourceBinding') AS binding,
+      json_extract(r.payload,'$.data.noteSources') AS note_sources,
+      json_extract(r.payload,'$.data.workoutSources') AS workout_sources,
+      json_extract(r.payload,'$.personalMethodSources') AS personal_methods FROM h_work r
+      WHERE ${f.sql} AND ${type} AND json_type(r.payload,'$.sourceBinding')='object'
+      ${options.id ? 'AND r.id=?' : ''}
+      ${options.matterId ? "AND json_extract(r.payload,'$.data.matterId')=?" : ''}
+      ${options.sessionId ? `AND (json_extract(r.payload,'$.data.sessionId')=? OR EXISTS(
+        SELECT 1 FROM json_each(r.payload,'$.data.sessionIds') membership WHERE membership.type='text' AND membership.value=?))` : ''}
+      AND (json_type(r.payload,'$.data.sourceIds') IS NULL OR json_type(r.payload,'$.data.sourceIds')='array')
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sourceIds') src WHERE src.type!='text' OR src.value NOT IN (SELECT value FROM json_each(?)))
+      AND (json_type(r.payload,'$.data.requiredGrants') IS NULL OR json_type(r.payload,'$.data.requiredGrants')='array')
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.requiredGrants') permission WHERE permission.type!='text' OR permission.value NOT IN (SELECT value FROM json_each(?)))
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.evidenceIds') ref WHERE NOT EXISTS(
+        SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted'))
+      ORDER BY r.rowid DESC`).all(...f.params, ...(options.id ? [options.id] : []), ...(options.matterId ? [options.matterId] : []),
+        ...(options.sessionId ? [options.sessionId, options.sessionId] : []), JSON.stringify(scope.sources), JSON.stringify(scope.grants), ...e.params);
+    const allowed = candidates.filter(row => {
+      if (this.hasFence(String(row.id))) return false;
+      try {
+        const methods: unknown = row.personal_methods === null ? [] : JSON.parse(String(row.personal_methods));
+        const notes: unknown = row.note_sources === null ? [] : JSON.parse(String(row.note_sources));
+        const workouts: unknown = row.workout_sources === null ? [] : JSON.parse(String(row.workout_sources));
+        return this.noteSourcesReadable(handle, notes) && this.workoutSourcesReadable(handle, workouts)
+          && Array.isArray(methods) && methods.every(source => this.verifyPersonalMethodSources?.(handle, source) === true)
+          && this.workBindingReadable(handle, JSON.parse(String(row.binding)));
+      }
+      catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+    }).slice(offset, offset + limit).map(row => String(row.id));
+    if (!allowed.length) return [];
+    const rows = this.db.prepare(`SELECT r.* FROM h_work r WHERE ${f.sql} AND r.id IN (SELECT value FROM json_each(?)) ORDER BY r.rowid DESC`)
+      .all(...f.params, JSON.stringify(allowed));
+    // Candidate opening is not delivery to a model. The owner returns the
+    // actually adopted records for the caller's normal receipt accounting.
+    return rows.map(row => parse<WorkRecord>(row)!);
+  }
+  readWorkSources(handle: ScopeHandle, record: WorkRecord) {
+    const current = this.work(handle, undefined, record.id)[0];
+    if (!current || current.revision !== record.revision || !current.sourceBinding || canonical(current.sourceBinding) !== canonical(record.sourceBinding))
+      throw new HarnessError('revision_conflict', "The matter or original-text range changed. Read again.");
+    return current.sourceBinding.refs.map(ref => {
+      const event = this.permittedWorkSource(handle, ref);
+      this.recordAccess(handle, { id: event.id, source: event.sourceId }, 'work_source_fragment');
+      return { ...ref, sourceId: event.sourceId, text: codePointSlice(event.text, ref.start, ref.end) };
+    });
+  }
+  exportWorkingRecords(handle: ScopeHandle) {
+    const scope = this.scope(handle), bindings = this.workSourceFilter(handle), sources = this.helpSourceFilter(handle);
+    const work = this.db.prepare(`SELECT r.payload FROM h_work r WHERE r.owner=? AND r.workspace=?
+      AND r.retain!='session_only' AND r.sensitivity!='restricted' AND ${bindings.sql} AND ${sources.sql}`)
+      .all(scope.principalId, scope.workspaceId, ...bindings.params, ...sources.params).map(row => parse<WorkRecord>(row)!);
+    return [...work, ...this.exportSpatialWorkingRecords(handle)];
+  }
+  /** Export the same accepted configuration owner without reopening generic
+   * Work bodies or the original request. Stored historical addresses retain
+   * only their own still-readable lifecycle, never a later binding's basis. */
+  private exportSpatialWorkingRecords(handle: ScopeHandle): WorkRecord[] {
+    if (!this.spatialOwnerScope(handle)) return [];
+    const f = this.filter(handle), result: WorkRecord[] = [];
+    const rows = this.db.prepare(`SELECT r.id,json_type(r.payload,'$.data.spatialBindingVersions') AS versions_type,
+      json_extract(r.payload,'$.data.spatialBindingVersions') AS versions,
+      json_extract(r.payload,'$.data.requiresRebuild') AS rebuild,
+      json_extract(r.payload,'$.data.invalidationReason') AS invalidation_reason
+      FROM h_work r WHERE ${f.sql} AND r.retain!='session_only' AND r.sensitivity!='restricted'
+      AND json_extract(r.payload,'$.data.type') IN ('spatial_role','spatial_alias','spatial_crosswalk') ORDER BY r.rowid`)
+      .all(...f.params);
+    for (const row of rows) {
+      const record = this.spatialBindingRecords(handle, String(row.id), true)[0];
+      if (!record) continue;
+      const currentReadable = this.spatialBindingBasisCurrent(handle, record.id, record.revision);
+      const erased = row.rebuild === 1 && row.invalidation_reason === 'source_deleted';
+      if (!currentReadable && !erased) continue;
+      let rawVersions: unknown = [];
+      try { if (row.versions_type === 'array') rawVersions = JSON.parse(String(row.versions)); }
+      catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+      const versions = Array.isArray(rawVersions) ? rawVersions.flatMap(value => {
+        const version = this.spatialVersionMetadata(value);
+        return version && version.revision < record.revision
+          && this.spatialBindingBasisCurrent(handle, record.id, version.revision) ? [version] : [];
+      }) : [];
+      const data: WorkRecord['data'] = currentReadable ? { ...record.data }
+        : { type: record.data.type, invalidationReason: 'source_deleted', requiresRebuild: true };
+      if (versions.length) data.spatialBindingVersions = versions;
+      result.push({ ...record, data });
+    }
+    return result;
+  }
+  exportWorkingState(handle: ScopeHandle) {
+    const work = this.exportWorkingRecords(handle), ids = JSON.stringify(work.filter(record => record.data.type === 'planning_intent').map(record => record.id));
+    const metadata = this.db.prepare('SELECT plan_id,source_binding,redacted FROM h_planning_intent_attempts WHERE intent_id IN (SELECT value FROM json_each(?))').all(ids);
+    const permittedPlans = metadata.filter(row => {
+      if (Number(row.redacted) !== 0 || typeof row.source_binding !== 'string') return false;
+      try { return this.workBindingReadable(handle, JSON.parse(row.source_binding)); }
+      catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+    }).map(row => String(row.plan_id));
+    const attempts = this.db.prepare('SELECT * FROM h_planning_intent_attempts WHERE plan_id IN (SELECT value FROM json_each(?))').all(JSON.stringify(permittedPlans));
+    const planIds = JSON.stringify(attempts.map(row => String(row.plan_id)));
+    const links = this.db.prepare('SELECT * FROM h_planning_intent_action_links WHERE plan_id IN (SELECT value FROM json_each(?))').all(planIds);
+    const scope = this.scope(handle), actionIds = JSON.stringify([...new Set(links.map(row => String(row.action_id)))]);
+    const permittedActions = JSON.stringify(this.db.prepare(`SELECT id FROM h_actions WHERE owner=? AND workspace=? AND id IN (SELECT value FROM json_each(?))`)
+      .all(scope.principalId, scope.workspaceId, actionIds).map(row => String(row.id)).filter(id => this.planningActionReadable(handle, id)));
+    return { work, planningIntentState: { version: 1,
+      attempts: attempts.map(row => ({ planId: row.plan_id, intentId: row.intent_id, specDigest: row.spec_digest, manifest: JSON.parse(String(row.manifest)), sourceBinding: JSON.parse(String(row.source_binding)), createdAt: row.created_at })),
+      actionLinks: links.map(row => ({ planId: row.plan_id, blockId: row.block_id, actionId: row.action_id, actionRevision: row.action_revision, actionDigest: row.action_digest })),
+      actionAttempts: this.db.prepare('SELECT id,action_id AS actionId,idempotency_key AS idempotencyKey,status FROM h_attempts WHERE action_id IN (SELECT value FROM json_each(?))').all(permittedActions),
+      receipts: this.db.prepare('SELECT payload FROM h_receipts WHERE action_id IN (SELECT value FROM json_each(?))').all(permittedActions).map(row => JSON.parse(String(row.payload))),
+      evidenceCoverage: metadata.length === attempts.length ? 'available' : 'unavailable', restoresAuthorization: false,
+    } };
+  }
+  sourcedWorkMetadata(handle: ScopeHandle, id: string) {
+    const scope = this.scope(handle);
+    if (scope.child || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || !scope.sources.includes('work:self') || !scope.grants.includes('work:write'))
+      throw new HarnessError('work_control_forbidden', "The current scope cannot manage this continuing matter.");
+    const f = this.filter(handle);
+    const row = this.db.prepare(`SELECT r.id,r.revision,r.status,r.kind,json_extract(r.payload,'$.data.type') AS type,
+      json_extract(r.payload,'$.data.matterId') AS matter_id
+      FROM h_work r WHERE ${f.sql} AND r.id=? AND json_type(r.payload,'$.sourceBinding')='object'`).get(...f.params, id);
+    if (!row || this.hasFence(id)) return;
+    return { id: String(row.id), revision: Number(row.revision), status: String(row.status), kind: String(row.kind), type: String(row.type),
+      ...(typeof row.matter_id === 'string' ? { matterId: row.matter_id } : {}) };
+  }
+  /** Stopping a known business intention does not require disclosing its old
+   * specification. This path cannot resume it or replace any source binding. */
+  transitionSourcedWork(handle: ScopeHandle, input: { id: string; expectedRevision: number; status: 'paused' | 'retired'; matterId?: string;
+    transition: { operation: 'pause' | 'retire'; source: WorkSourceRef; at?: string; quoteSha256?: string } }) {
+    return this.write(() => {
+      const old = this.sourcedWorkMetadata(handle, input.id), scope = this.scope(handle), ref = workSourceRefSchema.parse(input.transition.source);
+      const learning = old?.type === 'learning_process' && old.kind === 'experience';
+      if (!old || old.type !== 'planning_intent' && !learning || learning && old.matterId !== input.matterId)
+        throw new HarnessError('work_missing', "This continuing matter is missing or cannot be managed.");
+      if (old.revision !== input.expectedRevision) throw new HarnessError('revision_conflict', "The matter changed. Stop it using its current state.");
+      if (learning ? input.status !== 'retired' || input.transition.operation !== 'retire' || !['recorded', 'stale', 'blocked'].includes(old.status)
+        : input.status === 'paused' ? input.transition.operation !== 'pause' || old.status !== 'active'
+        : input.status !== 'retired' || input.transition.operation !== 'retire' || !['active', 'paused'].includes(old.status))
+        throw new HarnessError('planning_intent_state', "This stop operation does not apply to the current state.");
+      const source = this.permittedWorkSource(handle, ref);
+      if (!scope.currentEventIds.includes(source.id) || source.speaker !== 'user' || source.ownerId !== scope.principalId
+        || source.subjectId !== scope.principalId || source.worldId !== 'real')
+        throw new HarnessError('work_control_source', "Stopping the matter needs the user's explicit original words this turn.");
+      const now = this.clock.now(), revision = old.revision + 1;
+      const transition = { operation: input.transition.operation, source: ref, at: now,
+        quoteSha256: createHash('sha256').update(codePointSlice(source.text, ref.start, ref.end)).digest('hex') };
+      this.db.prepare(`UPDATE h_work SET status=?,revision=?,payload=json_set(payload,'$.status',?,'$.revision',?,
+        '$.data.updatedAt',?,'$.data.lastTransition',json(?)) WHERE id=? AND revision=?`)
+        .run(input.status, revision, input.status, revision, now, JSON.stringify(transition), old.id, old.revision);
+      this.outbox('work_changed', old.id);
+      return { id: old.id, revision, status: input.status };
+    });
+  }
+  saveSourcedWork(handle: ScopeHandle, input: WorkRecord, expectedRevision?: number) {
+    return this.write(() => {
+      if (!this.scope(handle).grants.includes('work:write') || !input.sourceBinding || input.label.retention !== 'purpose_scoped')
+        throw new HarnessError('work_sources_required', "A continuing matter with a source basis cannot be saved now.");
+      const binding = this.resolveWorkSourceBinding(handle, input.sourceBinding.refs);
+      if (canonical(binding) !== canonical(input.sourceBinding)
+        || canonical([...new Set(input.evidenceIds)].sort()) !== canonical([...new Set(binding.refs.map(ref => ref.eventId))].sort()))
+        throw new HarnessError('work_sources_changed', "The matter's support set differs from the actual statements.");
+      const sharedCreation = input.data.type === 'curiosity_invitation' || input.data.type === 'collaboration_frame' && input.data.curiosityInvitation === true;
+      const chapterSources = sharedCreation ? input.data.assistantWorkSources ?? [] : [];
+      if (!this.assistantWorkSourcesReadable(handle, chapterSources))
+        throw new HarnessError('curiosity_history_changed', "An original chapter source in this shared work changed. A new passage was not used to replace the old basis.");
+      this.writeWork(handle, input, expectedRevision, true);
+      for (const source of chapterSources as AssistantWorkSource[]) for (const [id, revision] of [[source.messageId, 1], [source.sceneId, source.sceneRevision]] as const)
+        this.addDependency(handle, { consumerId: input.id, producerId: id, producerRevision: revision, sensitivity: 'privacy', invalidation: 'block' });
+    });
+  }
+  saveWork(handle: ScopeHandle, input: WorkRecord, expectedRevision?: number) {
+    return this.write(() => this.writeWork(handle, input, expectedRevision, false));
+  }
+  saveSpatialWork(handle: ScopeHandle, input: WorkRecord, expectedRevision?: number) {
+    return this.write(() => this.writeWork(handle, input, expectedRevision, false, true));
+  }
+  private writeWork(handle: ScopeHandle, input: WorkRecord, expectedRevision: number | undefined, sourced: boolean, spatial = false) {
+    const s = this.scope(handle),
+      work = workSchema.parse(input);
+    const old = this.db.prepare('SELECT revision,payload FROM h_work WHERE id=?').get(work.id), oldWork = parse<WorkRecord>(old);
+    const spatialType = (type: unknown) => typeof type === 'string' && ['spatial_role', 'spatial_alias', 'spatial_crosswalk'].includes(type);
+    if (!spatial && (spatialType(work.data.type) || spatialType(oldWork?.data.type) || work.data.spatialBinding !== undefined || oldWork?.data.spatialBinding !== undefined))
+      throw new HarnessError('typed_work_writer_required', "Edit personal place configuration through its original place entry.");
+    if (spatial) {
+      const binding = spatialBindingSchema.safeParse(work.data.spatialBinding);
+      const fields = ['type', 'role', 'alias', 'placeId', 'referenceId', 'referenceNamespace', 'namespace', 'mapVersion', 'spatialBinding', 'publicDataChanged', 'recordedAt', 'updatedAt'];
+      if (!this.spatialOwnerScope(handle) || !s.grants.includes('work:write') || !spatialType(work.data.type)
+        || oldWork && !spatialType(oldWork.data.type) || !['active', 'cancelled'].includes(work.status) || !binding.success
+        || work.kind !== 'experience' || work.label.infer || work.sourceBinding !== undefined
+        || work.revision !== (oldWork ? oldWork.revision + 1 : 1)
+        || Object.keys(work.data).some(key => !fields.includes(key)))
+        throw new HarnessError('spatial_binding_invalid', "The place configuration does not match this explicit edit.");
+      if (work.status === 'cancelled') {
+        const previous = spatialBindingSchema.safeParse(oldWork?.data.spatialBinding);
+        const legacyPublic = oldWork?.data.spatialBinding === undefined && binding.data.endpoint.kind === 'public'
+          && binding.data.endpoint.pointId === oldWork?.data.placeId;
+        if (!previous.success && !legacyPublic || previous.success && canonical(previous.data.endpoint) !== canonical(binding.data.endpoint))
+          throw new HarnessError('spatial_binding_invalid', "Cancelling a place binding needs the original configuration's exact identity.");
+      }
+      const basis = binding.data.basis, event = this.evidence(handle, basis.eventId);
+      if (!s.currentEventIds.includes(basis.eventId) || !event || event.speaker !== 'user' || event.authority !== 'user_statement'
+        || event.contentVersion !== basis.contentVersion || basis.end > Array.from(event.text).length
+        || createHash('sha256').update(codePointSlice(event.text, basis.start, basis.end)).digest('hex') !== basis.quoteSha256
+        || canonical([...new Set(work.evidenceIds)]) !== canonical([basis.eventId])
+        || !this.spatialBasisAddressesCurrent(handle, [basis]))
+        throw new HarnessError('spatial_basis_changed', "A place edit needs the exact passage of the user's actual words this turn.");
+      const rawVersions = oldWork?.data.spatialBindingVersions === undefined ? [] : oldWork.data.spatialBindingVersions;
+      if (!Array.isArray(rawVersions)) throw new HarnessError('spatial_binding_invalid', "The place configuration's old revision record is incomplete.");
+      const versions = rawVersions.map(value => this.spatialVersionMetadata(value));
+      if (versions.some(value => !value) || new Set(versions.map(value => value!.revision)).size !== versions.length)
+        throw new HarnessError('spatial_binding_invalid', "The place configuration's old revision record is incomplete.");
+      const previous = oldWork && oldWork.data.requiresRebuild !== true ? this.spatialVersionFromRecord(oldWork) : undefined;
+      if (previous) {
+        const frozen = versions.find(value => value!.revision === previous.revision);
+        if (frozen && canonical(frozen) !== canonical(previous)) throw new HarnessError('spatial_binding_invalid', "The place configuration's old revision identity does not match.");
+        if (!frozen) versions.push(previous);
+      }
+      if (versions.length) work.data.spatialBindingVersions = versions as SpatialBindingVersionMetadata[];
+    } else {
+      const spatialContext = this.spatialApplications.getStore();
+      const sources = [...new Map([...(spatialSourceProofSchema.array().parse(oldWork?.data.spatialSources === undefined ? [] : oldWork.data.spatialSources)),
+        ...(spatialSourceProofSchema.array().parse(work.data.spatialSources === undefined ? [] : work.data.spatialSources)),
+        ...(spatialContext?.scopeId === handle.id ? spatialContext.items : [])]
+        .map(source => [canonical(source), source])).values()];
+      if (!this.spatialSourcesReadable(handle, sources))
+        throw new HarnessError('spatial_source_changed', "The place basis used by this matter changed.");
+      if (sources.length) work.data.spatialSources = sources;
+    }
+    if (!spatial) {
+      const workoutContext = this.workoutApplications.getStore();
+      const previousSources = workoutSourceProofSchema.array().parse(oldWork?.data.workoutSources || []);
+      const hostSources = workoutContext?.scopeId === handle.id ? workoutContext.items : [];
+      const allowed = new Map([...previousSources, ...hostSources].map(source => [canonical(source), source]));
+      const requested = workoutSourceProofSchema.array().parse(work.data.workoutSources || []);
+      if (requested.some(source => !allowed.has(canonical(source))))
+        throw new HarnessError('workout_source_unread', "The activity summary mentioned by this matter was not actually read.");
+      const sources = [...allowed.values()];
+      if (!this.workoutSourcesReadable(handle, sources))
+        throw new HarnessError('workout_source_changed', "The activity record used by this matter was cancelled. The old summary was not saved.");
+      if (sources.length) work.data.workoutSources = sources;
+    }
+    const context = this.methodApplications.getStore();
+    const methodRefs = context?.scopeId === handle.id && context.items.length && work.data.type !== 'personal_method'
+      ? work.sourceBinding?.refs || (work.kind === 'episode' ? declaredFrameSourceRefs(work, eventId => this.evidence(handle, eventId)) : undefined)
+      : undefined;
+    const applied = context?.scopeId === handle.id && work.data.type !== 'personal_method' ? context.items.filter(application => {
+      const sameMatter = work.id === application.matterId || work.data.matterId === application.matterId;
+      if (application.matterId && !sameMatter) return false;
+      const overlaps = methodRefs?.some(ref => ref.eventId === application.source.eventId && ref.contentVersion === application.source.contentVersion
+        && ref.start < application.source.end && ref.end > application.source.start);
+      return overlaps || !work.sourceBinding && !!application.matterId && sameMatter && work.evidenceIds.includes(application.source.eventId);
+    }) : [];
+    for (const application of applied) {
+      const filter = this.filter(handle);
+      const method = this.db.prepare(`SELECT r.revision,r.status FROM h_work r WHERE ${filter.sql} AND r.id=?
+        AND json_extract(r.payload,'$.data.type')='personal_method'`).get(...filter.params, application.methodId);
+      const source = this.permittedWorkSource(handle, application.source);
+      if (!method || method.revision !== application.revision || method.status !== 'active' || !s.currentEventIds.includes(source.id)
+        || source.speaker !== 'user' || source.authority !== 'user_statement')
+        throw new HarnessError('personal_method_changed', "The borrowed method or current request changed. Follow current wishes; old method-derived text was not saved.");
+    }
+    const methodSources = [...new Map([...(work.personalMethodSources || []), ...applied.map(application => application.sources)]
+      .map(source => [canonical(source), personalMethodSourcesSchema.parse(source)])).values()];
+    if (methodSources.length) {
+      if (!methodSources.every(source => this.verifyPersonalMethodSources?.(handle, source) === true))
+        throw new HarnessError('personal_method_source_changed', "The original help borrowed by this new work is unreadable. A new artifact was not used to restore old text.");
+      work.personalMethodSources = methodSources;
+    }
+    if (
+      work.ownerId !== s.principalId ||
+      work.workspaceId !== s.workspaceId ||
+      work.subjectId !== s.subjectId ||
+      work.worldId !== s.worldId ||
+      s.retention === 'session_only'
+    )
+      throw new HarnessError('scope_mismatch', "This matter cannot be saved.");
+    for (const id of work.evidenceIds)
+      if (!this.evidence(handle, id)) throw new HarnessError('evidence_forbidden', "The matter's evidence is unavailable.");
+    if (this.hasFence(work.id)) throw new HarnessError('deleted_object', "This matter was deleted.");
+    if (!this.materialNavigationSourcesReadable(handle, work.data.materialNavigationSources))
+      throw new HarnessError('material_navigation_changed', "A material address used by this matter changed. Content derived from the old address was not saved.");
+    this.write(() => {
+      if (!sourced && (work.sourceBinding || work.data.type === 'planning_intent' || parse<WorkRecord>(old)?.sourceBinding))
+        throw new HarnessError('typed_work_writer_required', "Edit this continuing specification from the original statement and current revision; do not directly merge old data.");
+      if (old && Number(old.revision) !== expectedRevision) {
+        this.conflicts.push({
+          objectId: work.id,
+          expected: expectedRevision || 0,
+          actual: Number(old.revision),
+        });
+        throw new HarnessError('revision_conflict', "The matter was updated. Read it before editing.");
+      }
+      this.db
+        .prepare(
+          `INSERT INTO h_work VALUES(${Array(17).fill('?').join(',')}) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,status=excluded.status,title=excluded.title,payload=excluded.payload`,
+        )
+        .run(
+          work.id,
+          ...this.envelope(work, 'work:self'),
+          work.kind,
+          work.revision,
+          work.status,
+          work.title,
+          JSON.stringify(work),
+        );
+      for (const proof of materialNavigationProofSchema.array().parse(work.data.materialNavigationSources || []))
+        for (const producerId of new Set([proof.messageId, ...(proof.via || []).map(address => address.messageId),
+          proof.sourceEventId, 'file:' + proof.sourceEventId]))
+          this.addDependency(handle, { consumerId: work.id, producerId, producerRevision: 0, sensitivity: 'privacy', invalidation: 'block' });
+      for (const proof of spatialSourceProofSchema.array().parse(work.data.spatialSources || []))
+        this.addDependency(handle, { consumerId: work.id, producerId: proof.origin.id,
+          producerRevision: proof.origin.kind === 'binding' ? proof.origin.revision : 0, sensitivity: 'privacy', invalidation: 'block' });
+      for (const proof of workoutSourceProofSchema.array().parse(work.data.workoutSources || []))
+        this.addDependency(handle, { consumerId: work.id, producerId: workoutSourceObjectId(proof.workoutId),
+          producerRevision: proof.revision, sensitivity: 'privacy', invalidation: 'block' });
+      if (spatial && oldWork && spatialType(oldWork.data.type)) for (const eventId of oldWork.evidenceIds)
+        this.db.prepare(`DELETE FROM h_dependencies WHERE consumer_id=? AND producer_id=? AND producer_revision=?
+          AND sensitivity='privacy' AND invalidation='block'`).run(work.id, eventId,
+          this.dependencies(work.id).find(dependency => dependency.producerId === eventId)?.producerRevision ?? 0);
+      this.outbox('work_changed', work.id);
+    });
+  }
+  /** Prepared bodies carry the sources actually read, independently of the
+   * user's mandate. Legacy material is readable only when each source can be
+   * established from its stored receipt; a broad captured scope is no proof. */
+  private helpSourceFilter(handle: ScopeHandle) {
+    const scope = this.scope(handle);
+    const allowed = JSON.stringify(scope.sources.filter(source => scope.grants.includes(source === 'map:local' ? 'map:read'
+      : source === 'weather:open-meteo' ? 'weather:read' : source === 'profile:self' ? 'memory:read' : source.startsWith('campus:') ? 'campus:read' : 'evidence:read')));
+    return { sql: `(COALESCE(json_extract(r.payload,'$.data.type'),'') NOT IN ('help_opportunity','cooperation_record') OR (
+      (json_type(r.payload,'$.data.sourceIds') IS NULL OR json_type(r.payload,'$.data.sourceIds')='array')
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sourceIds') src WHERE src.type!='text' OR src.value NOT IN (SELECT value FROM json_each(?)))
+      AND (json_type(r.payload,'$.data.requiredGrants') IS NULL OR json_type(r.payload,'$.data.requiredGrants')='array')
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.requiredGrants') permission WHERE permission.type!='text' OR permission.value NOT IN (SELECT value FROM json_each(?)))
+      AND ((NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sourceIds') src WHERE src.value LIKE 'campus:%')
+        AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.material') material WHERE json_extract(material.value,'$.sourceId') LIKE 'campus:%'
+          OR EXISTS(SELECT 1 FROM json_each(material.value,'$.sourceIds') src WHERE src.value LIKE 'campus:%')
+          OR EXISTS(SELECT 1 FROM json_each(material.value,'$.versions') version WHERE json_extract(version.value,'$.sourceId') LIKE 'campus:%'))
+        AND NOT EXISTS(SELECT 1 FROM h_evidence evidence WHERE evidence.id IN (SELECT value FROM json_each(r.payload,'$.evidenceIds'))
+          AND evidence.source LIKE 'campus:%' AND json_extract(evidence.payload,'$.speaker')='external'))
+        OR (json_extract(r.payload,'$.data.materialGrantContractVersion')=1 AND json_type(r.payload,'$.data.requiredGrants')='array'
+          AND EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.requiredGrants') permission WHERE permission.value='campus:read')))
+      AND (((json_type(r.payload,'$.data.artifact') IS NULL OR json_type(r.payload,'$.data.artifact')='null')
+          AND (json_type(r.payload,'$.data.material') IS NULL OR json_type(r.payload,'$.data.material')='null' OR (json_type(r.payload,'$.data.material')='array' AND json_array_length(r.payload,'$.data.material')=0)))
+        OR (json_extract(r.payload,'$.data.materialSourceContractVersion')=1 AND json_type(r.payload,'$.data.sourceIds')='array' AND json_array_length(r.payload,'$.data.sourceIds')>0)
+        OR (json_type(r.payload,'$.data.material')='array' AND json_array_length(r.payload,'$.data.material')>0
+          AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.material') material WHERE NOT CASE
+            WHEN json_type(material.value,'$.noteId')='text' OR json_extract(material.value,'$.tool')='manage_note'
+              THEN 'notes:self' IN (SELECT value FROM json_each(?))
+            WHEN json_type(material.value,'$.evidenceId')='text'
+              THEN EXISTS(SELECT 1 FROM json_each(r.payload,'$.evidenceIds') ref WHERE ref.value=json_extract(material.value,'$.evidenceId'))
+            ELSE COALESCE(json_type(material.value,'$.sourceId')='text' AND json_extract(material.value,'$.sourceId')!='current'
+              AND json_extract(material.value,'$.sourceId') IN (SELECT value FROM json_each(?)),0) END))
+      )))`, params: [allowed, JSON.stringify(scope.grants), allowed, allowed] };
+  }
+  work(handle: ScopeHandle, kind?: WorkRecord['kind'], id?: string): WorkRecord[] {
+    const f = this.filter(handle),
+      e = this.filter(handle, 'e'), sources = this.helpSourceFilter(handle), bindings = this.workSourceFilter(handle);
+    const rows = this.db
+      .prepare(
+        `SELECT r.* FROM h_work r WHERE ${f.sql} ${kind ? 'AND r.kind=?' : ''} ${id ? 'AND r.id=?' : ''} AND ${sources.sql} AND ${bindings.sql}
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.evidenceIds') ref WHERE NOT EXISTS(SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted'))
+      ORDER BY r.rowid DESC LIMIT 200`,
+      )
+      .all(...f.params, ...(kind ? [kind] : []), ...(id ? [id] : []), ...sources.params, ...bindings.params, ...e.params);
+    return rows.map((r) => parse<WorkRecord>(r)!);
+  }
+  /** Bounded typed working records, with the same SQL-before-body scope and
+   * source checks as ordinary work. No parallel personal information store. */
+  workData(handle: ScopeHandle, types: string[], options: { id?: string; revision?: number; matterId?: string; sessionId?: string; statuses?: string[]; limit?: number; offset?: number; query?: string; respectSourceBindings?: boolean; excludeCuriosityInvitations?: boolean } = {}) {
+    const limit = options.limit || 20, offset = options.offset || 0;
+    if (!types.length || types.length > 12 || !Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0)
+      throw new HarnessError('invalid_page', "The work-record reading range is invalid.");
+    if (options.query !== undefined && (typeof options.query !== 'string' || options.query.length > 300)) throw new HarnessError('invalid_query', "The matter search scope is invalid.");
+    const terms = [...new Set((options.query || '').normalize('NFKC').trim().toLowerCase().split(/\s+/).filter(Boolean))];
+    if (terms.length > 16) throw new HarnessError('invalid_query', "Too many search terms. Narrow the query.");
+    const f = this.filter(handle), e = this.filter(handle, 'e'), sources = this.helpSourceFilter(handle), bindings = this.workSourceFilter(handle);
+    const rows = this.db.prepare(`SELECT r.* FROM h_work r WHERE ${f.sql}
+      AND ${sources.sql} AND ${bindings.sql}
+      AND json_extract(r.payload,'$.data.type') IN (SELECT value FROM json_each(?))
+      ${options.excludeCuriosityInvitations ? "AND COALESCE(json_type(r.payload,'$.data.curiosityInvitation'),'null')!='true'" : ''}
+      ${options.id ? 'AND r.id=?' : ''}
+      ${options.revision !== undefined ? 'AND r.revision=?' : ''}
+      ${options.matterId ? "AND json_extract(r.payload,'$.data.matterId')=?" : ''}
+      ${options.sessionId ? `AND (json_extract(r.payload,'$.data.sessionId')=? OR (
+        json_extract(r.payload,'$.data.type')='planning_intent' AND json_type(r.payload,'$.data.sessionIds')='array'
+        AND EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sessionIds') membership WHERE membership.type='text' AND membership.value=?)))` : ''}
+      ${options.statuses ? 'AND r.status IN (SELECT value FROM json_each(?))' : ''}
+      ${options.respectSourceBindings ? "AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sourceIds') src WHERE src.value NOT IN (SELECT value FROM json_each(?)))" : ''}
+      ${terms.length ? 'AND (' + terms.map(() => "instr(lower(r.title || ' ' || r.payload),?)>0").join(' OR ') + ')' : ''}
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.evidenceIds') ref WHERE NOT EXISTS(SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted'))
+      ORDER BY r.rowid DESC LIMIT ? OFFSET ?`).all(...f.params, ...sources.params, ...bindings.params, JSON.stringify(types), ...(options.id ? [options.id] : []), ...(options.revision !== undefined ? [options.revision] : []), ...(options.matterId ? [options.matterId] : []), ...(options.sessionId ? [options.sessionId, options.sessionId] : []), ...(options.statuses ? [JSON.stringify(options.statuses)] : []), ...(options.respectSourceBindings ? [JSON.stringify(this.scope(handle).sources)] : []), ...terms, ...e.params, limit, offset);
+    for (const row of rows) this.recordAccess(handle, row, 'working_record');
+    return rows.map(row => parse<WorkRecord>(row)!);
+  }
+  /** Only sync proposals for exact, currently readable own working records.
+   * Metadata has no independent owner label, so scope is enforced on the work
+   * and its evidence before any proposal body is returned. */
+  pendingSyncForWork(handle: ScopeHandle, objectIds: string[], offset = 0, limit = 8) {
+    const scope = this.scope(handle);
+    if (scope.audience !== 'self' || scope.subjectId !== scope.principalId || scope.worldId !== 'real'
+      || !scope.sources.includes('work:self') || !scope.grants.includes('evidence:read')) return { items: [], nextOffset: null };
+    if (objectIds.length > 24 || objectIds.some(id => typeof id !== 'string' || !id || id.length > 160)
+      || !Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 20)
+      throw new HarnessError('invalid_page', "The synchronized-edit reading scope is invalid.");
+    const selectedIds = [...new Set(objectIds)].filter(id => !this.hasFence(id));
+    if (!selectedIds.length) return { items: [], nextOffset: null };
+    const f = this.filter(handle, 'w'), e = this.filter(handle, 'e'), bindings = this.workSourceFilter(handle, 'w');
+    const permittedSources = JSON.stringify(scope.sources.filter(source => source !== 'current'));
+    const rows = this.db.prepare(`SELECT s.*,w.source,w.title,w.revision AS current_revision,w.payload AS current_payload
+      FROM h_sync_operations s JOIN h_work w ON w.id=s.object_id WHERE ${f.sql} AND ${bindings.sql}
+      AND json_type(w.payload,'$.sourceBinding') IS NULL AND COALESCE(json_extract(w.payload,'$.data.type'),'')!='planning_intent'
+      AND w.id IN (SELECT value FROM json_each(?)) AND s.epoch=?
+      AND ((s.status='pending' AND s.base_revision=w.revision)
+        OR (s.status='rejected' AND json_extract(s.result,'$.code')='revision_conflict'
+          AND json_extract(s.result,'$.currentRevision')=w.revision))
+      AND (json_type(w.payload,'$.data.sourceIds') IS NULL OR json_type(w.payload,'$.data.sourceIds')='array')
+      AND NOT EXISTS(SELECT 1 FROM json_each(w.payload,'$.data.sourceIds') src WHERE src.type!='text' OR src.value NOT IN (SELECT value FROM json_each(?)))
+      AND (json_type(s.result,'$.proposed.data.sourceIds') IS NULL OR json_type(s.result,'$.proposed.data.sourceIds')='array')
+      AND NOT EXISTS(SELECT 1 FROM json_each(s.result,'$.proposed.data.sourceIds') src WHERE src.type!='text' OR src.value NOT IN (SELECT value FROM json_each(?)))
+      AND NOT EXISTS(SELECT 1 FROM json_each(w.payload,'$.evidenceIds') ref WHERE NOT EXISTS
+        (SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted'))
+      ORDER BY s.rowid DESC LIMIT ? OFFSET ?`).all(...f.params, ...bindings.params, JSON.stringify(selectedIds), this.epoch,
+        permittedSources, permittedSources, ...e.params, limit + 1, offset);
+    const items = rows.slice(0, limit).map(row => {
+      const result = JSON.parse(String(row.result)), work = JSON.parse(String(row.current_payload)) as WorkRecord;
+      const delta = result.proposed || {}, changes: { field: string; proposed: unknown; current: unknown }[] = [];
+      for (const field of ['title', 'status']) if (Object.hasOwn(delta, field)) changes.push({ field, proposed: delta[field], current: work[field as 'title' | 'status'] });
+      if (delta.data && typeof delta.data === 'object') for (const [field, value] of Object.entries(delta.data))
+        changes.push({ field: 'data.' + field, proposed: value, current: work.data[field] ?? null });
+      this.recordAccess(handle, { id: work.id, source: row.source }, 'sync_proposal');
+      return { objectId: work.id, operationId: String(row.operation_id), deviceId: String(row.device_id),
+        state: row.status === 'pending' ? 'not_synced' : 'revision_conflict', expectedRevision: Number(row.base_revision),
+        currentRevision: work.revision, createdAt: result.createdAt || null, changes,
+        authoritativeObjectChanged: false, requiresUserChoice: row.status === 'rejected' };
+    });
+    return { items, nextOffset: rows.length > limit ? offset + limit : null };
+  }
+  /** Source discovery returns existing owner records, never dependency-graph
+   * neighbours. The fixed rowid ceiling only freezes enumeration; every page
+   * still applies current source, revision and caller-session permissions. */
+  sourceRelatedWorkPage(handle: ScopeHandle, options: { sourceRefs: WorkSourceRef[]; snapshot?: number; before?: number; limit: number; sessionId?: string }) {
+    const scope = this.scope(handle);
+    if (scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || !scope.sources.includes('work:self') || !scope.grants.includes('evidence:read'))
+      throw new HarnessError('source_related_scope', "The current scope cannot find the user's work records from original text.");
+    if (!options.sourceRefs.length || options.sourceRefs.length > 8 || !Number.isInteger(options.limit) || options.limit < 0 || options.limit > 200
+      || options.snapshot !== undefined && (!Number.isSafeInteger(options.snapshot) || options.snapshot < 0)
+      || options.before !== undefined && (!Number.isSafeInteger(options.before) || options.before < 0)
+      || options.sessionId !== undefined && (!options.sessionId || options.sessionId.length > 160))
+      throw new HarnessError('invalid_page', "The source-related directory reading scope is invalid.");
+    const refs = this.resolveWorkSourceBinding(handle, options.sourceRefs).refs;
+    const f = this.filter(handle), e = this.filter(handle, 'e'), bindings = this.workSourceFilter(handle), sources = this.helpSourceFilter(handle);
+    const membership = (alias: string) => `(json_extract(${alias}.payload,'$.data.sessionId')=? OR EXISTS(
+      SELECT 1 FROM json_each(${alias}.payload,'$.data.sessionIds') session WHERE session.type='text' AND session.value=?))`;
+    const parent = options.sessionId ? this.filter(handle, 'p') : undefined;
+    const parentBindings = options.sessionId ? this.workSourceFilter(handle, 'p') : undefined;
+    const scoped = `FROM h_work r WHERE ${f.sql} AND ${sources.sql} AND ${bindings.sql}
+      AND ((r.kind='episode' AND json_extract(r.payload,'$.data.type')='collaboration_frame') OR r.kind='goal'
+        OR (r.kind='experience' AND json_extract(r.payload,'$.data.type')='learning_process' AND r.status='recorded')
+        OR (r.kind='recipe_candidate' AND json_extract(r.payload,'$.data.type')='personal_method' AND r.status='active')
+        OR (r.kind='option' AND json_extract(r.payload,'$.data.type')='planning_alternative')
+        OR (r.kind='plan' AND json_extract(r.payload,'$.data.type')='planning_intent' AND r.status IN ('active','paused','retired')))
+      AND (json_type(r.payload,'$.data.sourceIds') IS NULL OR json_type(r.payload,'$.data.sourceIds')='array')
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sourceIds') source WHERE source.type!='text' OR source.value NOT IN (SELECT value FROM json_each(?)))
+      AND (json_type(r.payload,'$.data.requiredGrants') IS NULL OR json_type(r.payload,'$.data.requiredGrants')='array')
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.requiredGrants') permission WHERE permission.type!='text' OR permission.value NOT IN (SELECT value FROM json_each(?)))
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.evidenceIds') ref WHERE NOT EXISTS(
+        SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted'))
+      AND ((json_type(r.payload,'$.sourceBinding')='object' AND EXISTS(
+        SELECT 1 FROM json_each(r.payload,'$.sourceBinding.refs') bound JOIN json_each(?) query
+        WHERE json_extract(bound.value,'$.eventId')=json_extract(query.value,'$.eventId')
+          AND json_extract(bound.value,'$.contentVersion')=json_extract(query.value,'$.contentVersion')
+          AND json_extract(bound.value,'$.start')<json_extract(query.value,'$.end')
+          AND json_extract(bound.value,'$.end')>json_extract(query.value,'$.start')))
+        OR (json_type(r.payload,'$.sourceBinding') IS NULL AND EXISTS(
+          SELECT 1 FROM json_each(r.payload,'$.evidenceIds') declared JOIN json_each(?) query
+          WHERE declared.type='text' AND declared.value=json_extract(query.value,'$.eventId'))))
+      ${options.sessionId ? `AND (${membership('r')} OR EXISTS(SELECT 1 FROM h_work p WHERE ${parent!.sql} AND ${parentBindings!.sql}
+        AND (p.kind='goal' OR (p.kind='episode' AND json_extract(p.payload,'$.data.type')='collaboration_frame'))
+        AND (p.id=json_extract(r.payload,'$.data.matterId') OR p.id=json_extract(r.payload,'$.data.episodeId'))
+        AND ${membership('p')}
+        AND (json_type(p.payload,'$.data.sourceIds') IS NULL OR json_type(p.payload,'$.data.sourceIds')='array')
+        AND NOT EXISTS(SELECT 1 FROM json_each(p.payload,'$.data.sourceIds') source WHERE source.type!='text' OR source.value NOT IN (SELECT value FROM json_each(?)))
+        AND NOT EXISTS(SELECT 1 FROM json_each(p.payload,'$.evidenceIds') ref WHERE NOT EXISTS(
+          SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted'))))` : ''}`;
+    const params: SQLInputValue[] = [...f.params, ...sources.params, ...bindings.params, JSON.stringify(scope.sources), JSON.stringify(scope.grants),
+      ...e.params, JSON.stringify(refs), JSON.stringify(refs), ...(options.sessionId ? [options.sessionId, options.sessionId,
+        ...parent!.params, ...parentBindings!.params, options.sessionId, options.sessionId, JSON.stringify(scope.sources), ...e.params] : [])];
+    const snapshot = options.snapshot ?? Number(this.db.prepare(`SELECT COALESCE(MAX(r.rowid),0) AS ceiling ${scoped}`).get(...params)?.ceiling || 0);
+    const before = options.before ?? snapshot + 1;
+    if (!Number.isSafeInteger(snapshot) || !Number.isSafeInteger(before) || before > snapshot + 1)
+      throw new HarnessError('invalid_page', "The source-related directory position is invalid.");
+    if (!options.limit) return { snapshot, exhausted: snapshot === 0, items: [] as { record: WorkRecord; order: number }[] };
+    const rows = this.db.prepare(`SELECT r.payload,r.rowid AS work_order ${scoped}
+      AND r.rowid<=? AND r.rowid<? ORDER BY r.rowid DESC LIMIT ?`).all(...params, snapshot, before, options.limit + 1);
+    return { snapshot, exhausted: rows.length <= options.limit,
+      items: rows.slice(0, options.limit).map(row => ({ record: parse<WorkRecord>(row)!, order: Number(row.work_order) })) };
+  }
+  relatedWorkPage(handle: ScopeHandle, parentIds: string[], offset = 0, limit = 8) {
+    if (!parentIds.length) return { items: [] as WorkRecord[], total: 0, nextOffset: null as number | null };
+    if (parentIds.length > 20 || !Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 20) throw new HarnessError('invalid_page', "The related-matter reading scope is invalid.");
+    const f = this.filter(handle), e = this.filter(handle, 'e'), bindings = this.workSourceFilter(handle);
+    const scoped = `WITH related AS MATERIALIZED(SELECT r.*,r.rowid AS work_order FROM h_work r WHERE ${f.sql} AND ${bindings.sql}
+      AND COALESCE(json_extract(r.payload,'$.data.type'),'')!='planning_intent'
+      AND (json_extract(r.payload,'$.data.matterId') IN (SELECT value FROM json_each(?)) OR json_extract(r.payload,'$.data.episodeId') IN (SELECT value FROM json_each(?)))
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sourceIds') src WHERE src.value NOT IN (SELECT value FROM json_each(?)))
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.evidenceIds') ref WHERE NOT EXISTS(SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted')))`;
+    const params = [...f.params, ...bindings.params, JSON.stringify(parentIds), JSON.stringify(parentIds), JSON.stringify(this.scope(handle).sources), ...e.params];
+    const total = Number(this.db.prepare(`${scoped} SELECT count(*) AS total FROM related`).get(...params)?.total || 0);
+    const rows = this.db.prepare(`${scoped} SELECT * FROM related ORDER BY work_order DESC LIMIT ? OFFSET ?`).all(...params, limit, offset);
+    for (const row of rows) this.recordAccess(handle, row, 'related_work');
+    return { items: rows.map(row => parse<WorkRecord>(row)!), total, nextOffset: offset + rows.length < total ? offset + rows.length : null };
+  }
+  /** Validate an assistant aid against its actual source receipt without copying
+   * its body into a learning record. Missing legacy proof stays unavailable. */
+  resolveMemoryReferenceContext(handle: ScopeHandle, input: Pick<MemoryReferenceContext, 'messageId' | 'sessionId' | 'start' | 'end'>,
+    expected?: MemoryReferenceContext) {
+    if (!this.db.prepare('SELECT 1 FROM messages WHERE id=? AND session_id=?').get(input.messageId, input.sessionId)) return;
+    const original = this.learningAssistantSource(handle, { ...input, contentSha256: expected?.contentSha256 },
+      { historicalWork: true, historicalReference: true });
+    if (!original || expected && (canonical(original.sourceRefs) !== canonical(expected.sourceRefs)
+      || canonical(original.replyState || null) !== canonical(expected.replyState || null))) return;
+    const reference: MemoryReferenceContext = { messageId: input.messageId, sessionId: input.sessionId, start: input.start, end: input.end,
+      contentSha256: original.contentSha256, sourceRefs: original.sourceRefs,
+      ...(original.replyState ? { replyState: original.replyState } : {}) };
+    return { reference, text: codePointSlice(original.text, input.start, input.end) };
+  }
+  assertionReferenceContextsReadable(handle: ScopeHandle, raw: unknown): boolean {
+    if (raw === undefined) return true; // Existing assertions acquire no retrospective proof.
+    if (!Array.isArray(raw) || raw.length > 16) return false;
+    for (const value of raw) {
+      const parsed = memoryReferenceSchema.safeParse(value);
+      if (!parsed.success) return false;
+      const key = canonical([handle.id, parsed.data]);
+      if (this.memoryReferenceChecks.has(key)) return false;
+      this.memoryReferenceChecks.add(key);
+      try { if (!this.resolveMemoryReferenceContext(handle, parsed.data, parsed.data)) return false; }
+      finally { this.memoryReferenceChecks.delete(key); }
+    }
+    return true;
+  }
+  private unreadableAssertionReferences(handle: ScopeHandle) {
+    const filter = this.filter(handle);
+    return this.db.prepare(`SELECT r.id,json_extract(r.payload,'$.referenceContexts') AS refs FROM h_assertions r
+      WHERE ${filter.sql} AND json_type(r.payload,'$.referenceContexts') IS NOT NULL`).all(...filter.params)
+      .filter(row => !this.assertionReferenceContextsReadable(handle, JSON.parse(String(row.refs))))
+      .map(row => String(row.id));
+  }
+  /** Existing object-version receipts also carry newly reference-bound memories. */
+  assertionReferenceVersionsReadable(handle: ScopeHandle, versions: ContextReceipt['providedObjectVersions'] = [], localDisplay = false) {
+    if (!Array.isArray(versions)) return false;
+    return versions.every(version => {
+      if (!version || typeof version !== 'object') return false;
+      if (version.kind !== 'assertion') return true;
+      if (!this.understandingReceiptReadable(handle, localDisplay)) return false;
+      if (typeof version.id !== 'string' || !Number.isSafeInteger(version.revision) || version.revision < 1) return false;
+      const row = this.db.prepare('SELECT payload FROM h_assertion_versions WHERE id=? AND revision=?').get(version.id, version.revision);
+      if (!row) return false;
+      return this.assertionReferenceContextsReadable(handle, (JSON.parse(String(row.payload)) as Assertion).referenceContexts);
+    });
+  }
+
+  personalMethodAssistantSource(handle: ScopeHandle, input: { messageId: string; start: number; end: number; quote?: string; contentSha256?: string; sessionId?: string }) {
+    if (input.sessionId && !this.db.prepare('SELECT 1 FROM messages WHERE id=? AND session_id=?').get(input.messageId, input.sessionId)) return;
+    return this.learningAssistantSource(handle, input, { historicalWork: true });
+  }
+
+  private learningSourceAllowed(handle: ScopeHandle, source: unknown) {
+    const scope = this.scope(handle);
+    if (typeof source !== 'string') return false;
+    if (scope.sources.includes(source)) return true;
+    return source.startsWith('file:') && scope.currentEventIds.some(eventId => {
+      const event = this.evidence(handle, eventId);
+      return event?.kind === 'file_import' && event.sourceId === source;
+    });
+  }
+
+  /** Freeze only a currently readable owner version. Old messages never acquire
+   * a missing historical proof by consulting the owner's later contents. */
+  workSourceVersionBinding(handle: ScopeHandle, id: string, revision: number): WorkSourceBinding | undefined {
+    const record = this.work(handle, undefined, id)[0];
+    if (!record || record.revision !== revision) return;
+    const refs = record.sourceBinding?.refs || declaredFrameSourceRefs(record, eventId => this.evidence(handle, eventId));
+    if (!refs?.length) return;
+    return this.resolveWorkSourceBinding(handle, refs);
+  }
+
+  historicalWorkSourcesReadable(handle: ScopeHandle, raw: unknown): boolean {
+    if (raw === undefined) return true;
+    if (!Array.isArray(raw)) return false;
+    return raw.every(value => {
+      const parsed = historicalWorkSourceSchema.safeParse(value);
+      return parsed.success && this.verifyStudyWorkSources?.(handle, parsed.data) === true;
+    });
+  }
+
+  /** Extract the sources of the original Study versions actually supplied.
+   * A legacy same-version recheck supplies this new read, not the old receipt. */
+  studyWorkVersionSources(handle: ScopeHandle, raw: unknown): HistoricalWorkSource[] {
+    if (raw === undefined) return [];
+    if (!Array.isArray(raw)) throw new HarnessError('study_source_changed', "This old help's learning sources do not fully match.");
+    const f = this.filter(handle), sources: HistoricalWorkSource[] = [];
+    for (const value of raw) {
+      if (!value || typeof value !== 'object' || value.kind !== 'work') continue;
+      const ref = value as ContextReceipt['providedObjectVersions'][number];
+      if (typeof ref.id !== 'string') throw new HarnessError('study_source_changed', "This old help's learning address cannot be checked.");
+      const row = this.db.prepare(`SELECT json_extract(r.payload,'$.data.type') AS type FROM h_work r WHERE ${f.sql} AND r.id=?`)
+        .get(...f.params, ref.id);
+      if (row?.type !== 'study_companion') {
+        if (ref.id.startsWith('study:') || ref.sourceMaterial !== undefined)
+          throw new HarnessError('study_source_changed', "The study page linked by this old help is outside the current readable scope.");
+        continue;
+      }
+      if (!Number.isSafeInteger(ref.revision) || ref.revision < 1 || this.hasFence(ref.id))
+        throw new HarnessError('study_source_changed', "This old help's learning revision cannot be checked.");
+      const snapshot = ref.sourceBinding !== undefined ? { sourceBinding: ref.sourceBinding,
+        ...(ref.sourceMaterial !== undefined ? { sourceMaterial: ref.sourceMaterial } : {}),
+        ...(ref.noteSources !== undefined ? { noteSources: ref.noteSources } : {}),
+        ...(ref.problemIdentitySha256 !== undefined ? { problemIdentitySha256: ref.problemIdentitySha256 } : {}) }
+        : this.currentStudyWorkSources?.(handle, { id: ref.id, revision: ref.revision });
+      const parsed = historicalWorkSourceSchema.safeParse({ owner: 'study_companion', id: ref.id, revision: ref.revision, ...snapshot });
+      if (!parsed.success || !this.historicalWorkSourcesReadable(handle, [parsed.data]))
+        throw new HarnessError('study_source_changed', "The original problem or material behind this help left the currently available sources.");
+      sources.push(parsed.data);
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+
+  learningAssistantSource(handle: ScopeHandle, input: { messageId: string; start: number; end: number; quote?: string; contentSha256?: string },
+    options: { historicalWork?: boolean; historicalReference?: boolean } = {}):
+    { id: string; text: string; contentSha256: string; sourceRefs: WorkSourceRef[]; learningProcessIds: string[];
+      replyState?: MemoryReferenceContext['replyState'] } | undefined {
+    const scope = this.scope(handle);
+    if (scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || !scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || this.hasFence(input.messageId)) return;
+    const row = this.db.prepare(`SELECT m.content,m.payload FROM messages m WHERE m.id=? AND m.role='assistant'
+      AND ${options.historicalReference ? assistantReplyStatusSql('m') : "json_extract(m.payload,'$.status')='done'"}
+      AND EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id
+        AND e.owner=? AND e.workspace=? AND e.subject=? AND e.world='real' AND e.status!='deleted')
+      AND NOT EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id AND (e.owner!=? OR e.workspace!=?))`)
+      .get(input.messageId, scope.principalId, scope.workspaceId, scope.principalId, scope.principalId, scope.workspaceId);
+    if (!row) return;
+    const message = JSON.parse(String(row.payload)) as { contextReceipt?: ContextReceipt; scenes?: unknown; status?: string };
+    const receipt = message.contextReceipt, text = String(row.content), length = Array.from(text).length;
+    if (!Number.isSafeInteger(input.start) || !Number.isSafeInteger(input.end) || input.start < 0 || input.end <= input.start || input.end > length
+      || input.quote !== undefined && codePointSlice(text, input.start, input.end) !== input.quote
+      || !receipt || !Array.isArray(receipt.providedEvidenceIds) || !receipt.providedEvidenceIds.length
+      || !Array.isArray(receipt.providedSourceIds) || receipt.providedSourceIds.some(source => !this.learningSourceAllowed(handle, source))
+      || !Array.isArray(receipt.providedObjectVersions) || !this.planningMessageReadable(handle, message)) return;
+    const contentSha256 = createHash('sha256').update(text).digest('hex');
+    if (input.contentSha256 !== undefined && input.contentSha256 !== contentSha256) return;
+    const sourceRefs: WorkSourceRef[] = [];
+    try {
+      this.studyWorkVersionSources(handle, receipt.providedObjectVersions);
+      for (const eventId of [...new Set(receipt.providedEvidenceIds)]) {
+        const version = receipt.providedObjectVersions.find(ref => ref.kind === 'evidence' && ref.id === eventId)?.revision;
+        const event = this.evidence(handle, eventId);
+        if (!event || version !== event.contentVersion) return;
+        const ref = { eventId, contentVersion: event.contentVersion, start: 0, end: Array.from(event.text).length };
+        if (!ref.end) return;
+        this.permittedWorkSource(handle, ref);
+        sourceRefs.push(ref);
+      }
+      // Read directly: ordinary work() also checks learning aids and would
+      // recursively enumerate this same directory. These are version gates.
+      const f = this.filter(handle);
+      for (const ref of receipt.providedObjectVersions) {
+        if (ref.kind === 'evidence') continue;
+        if (ref.kind === 'assertion') {
+          const historical = options.historicalReference || receipt.historicalAssertionVersions?.some(value => value.id === ref.id && value.revision === ref.revision);
+          const value = historical ? this.assertionHistoryVersion(handle, ref.id, ref.revision) : this.assertion(handle, ref.id);
+          if (!value || value.revision !== ref.revision) return;
+        } else if (ref.kind === 'work') {
+          if (options.historicalWork && ref.sourceBinding !== undefined) {
+            const binding = workSourceBindingSchema.safeParse(ref.sourceBinding);
+            const owner = this.db.prepare(`SELECT r.id,json_extract(r.payload,'$.data.type') AS type FROM h_work r WHERE ${f.sql} AND r.id=?`).get(...f.params, ref.id);
+            if (!owner || !Number.isSafeInteger(ref.revision) || ref.revision < 1 || this.hasFence(ref.id)
+              || !binding.success || !this.workBindingReadable(handle, binding.data)) return;
+            sourceRefs.push(...binding.data.refs);
+            continue;
+          }
+          // An unrelated binding cannot prove this Work's former sources.
+          // Legacy replies without a per-version snapshot retain the original
+          // current-version gate; no later owner state fills their missing proof.
+          const value = this.db.prepare(`SELECT r.revision,json_extract(r.payload,'$.data.type') AS type,
+            json_extract(r.payload,'$.sourceBinding') AS binding,json_extract(r.payload,'$.data.sourceIds') AS sources
+            FROM h_work r WHERE ${f.sql} AND r.id=?`).get(...f.params, ref.id);
+          if (!value || value.revision !== ref.revision || this.hasFence(ref.id)) return;
+          const binding = value.binding === null ? undefined : workSourceBindingSchema.parse(JSON.parse(String(value.binding)));
+          const sources = value.sources === null ? undefined : JSON.parse(String(value.sources));
+          if (binding && !this.workBindingReadable(handle, binding)
+            || Array.isArray(sources) && sources.some(source => !this.learningSourceAllowed(handle, source))) return;
+          if (binding) sourceRefs.push(...binding.refs);
+        } else if (ref.kind === 'agenda') {
+          if (options.historicalReference) {
+            // This version proves what informed the old question, not which
+            // appointment is current. Normal rescheduling/cancellation does
+            // not rewrite that question; erasure still removes the version.
+            const versionId = this.calendarVersionId(ref.id, ref.revision);
+            if (!scope.sources.includes('local-agenda') || this.hasFence(ref.id, 'local-agenda')
+              || this.hasFence(versionId, 'local-agenda') || !this.db.prepare('SELECT 1 FROM h_calendar_versions WHERE id=?').get(versionId)) return;
+            continue;
+          }
+          const agenda = this.db.prepare('SELECT payload FROM agenda WHERE id=?').get(ref.id);
+          if (!scope.sources.includes('local-agenda') || !agenda || (JSON.parse(String(agenda.payload)).revision || 1) !== ref.revision) return;
+        } else if (ref.kind === 'domain') {
+          if (!scope.grants.includes('campus:read') || !ref.sourceId || !scope.sources.includes(ref.sourceId)) return;
+          if (options.historicalReference) {
+            const row = this.db.prepare(`SELECT payload FROM h_domain_versions
+              WHERE id=? AND source=? AND domain=? AND institution=? AND term=? AND revision=?`)
+              .get(ref.id, ref.sourceId, ref.domain || '', ref.institutionId || '', ref.termId || '', ref.revision);
+            const version = row && JSON.parse(String(row.payload)) as { evidenceId?: string; status?: string } | undefined;
+            const source = version?.evidenceId && this.evidence(handle, version.evidenceId);
+            if (!source || source.sourceId !== ref.sourceId || this.hasFence(ref.id, ref.sourceId)
+              || version?.status === 'known_absent') return;
+            continue;
+          }
+          const value = this.db.prepare(`SELECT r.revision FROM h_domain r WHERE ${f.sql} AND r.id=? AND r.source=? AND r.domain=? AND r.institution=? AND r.term=? AND r.status!='known_absent'`)
+            .get(...f.params, ref.id, ref.sourceId, ref.domain || '', ref.institutionId || '', ref.termId || '');
+          if (Number(value?.revision) !== ref.revision) return;
+        } else return;
+      }
+      const binding = this.resolveWorkSourceBinding(handle, sourceRefs);
+      return { id: input.messageId, text, contentSha256, sourceRefs: binding.refs, ...assistantReplyState(message.status),
+        learningProcessIds: [...new Set((receipt.learningProcessVersions || []).map(ref => ref.id))] };
+    } catch (error) {
+      if (error instanceof HarnessError || error instanceof SyntaxError || error instanceof Error && error.name === 'ZodError') return;
+      throw error;
+    }
+  }
+  learningProcessReadable(handle: ScopeHandle, id: string, revision: number) {
+    const scope = this.scope(handle), f = this.filter(handle);
+    if (!scope.sources.includes('work:self') || !scope.grants.includes('evidence:read') || this.hasFence(id)) return false;
+    const record = parse<WorkRecord>(this.db.prepare(`SELECT r.payload FROM h_work r WHERE ${f.sql} AND r.id=? AND r.revision=?
+      AND json_extract(r.payload,'$.data.type')='learning_process'`).get(...f.params, id, revision));
+    if (!record || !record.sourceBinding || !this.workBindingReadable(handle, record.sourceBinding)
+      || !Array.isArray(record.data.assistance) || Array.isArray(record.data.sourceIds)
+        && record.data.sourceIds.some(source => !this.learningSourceAllowed(handle, source))) return false;
+    return record.data.assistance.every((aid: any) => {
+      if (aid?.source?.kind !== 'assistant_message') return !!aid?.source?.eventId;
+      const source = aid.source;
+      const current = this.learningAssistantSource(handle, source, { historicalWork: true });
+      return !!current && canonical(current.sourceRefs) === canonical(source.sourceRefs);
+    });
+  }
+  /** Read a chapter from its original saved message, not the mutable current
+   * option seed. Candidates contain addresses/bindings only; the body is
+   * selected after the existing history and exact-source gates succeed. */
+  assistantHistoricalWorkIdentity(handle: ScopeHandle, raw: AssistantWorkSource & { sessionId?: string }) {
+    const scope = this.scope(handle), source = assistantWorkSourceSchema.parse({ messageId: raw.messageId, sceneId: raw.sceneId, sceneRevision: raw.sceneRevision });
+    if (scope.audience !== 'self' || scope.subjectId !== scope.principalId || scope.worldId !== 'real'
+      || !scope.sources.includes('history:self') || !scope.sources.includes('work:self') || !scope.grants.includes('evidence:read')) return;
+    // Before interpreting the current utterance, only classify its exact UI
+    // address. This query selects no opening, story, focus or original quote.
+    const row = this.db.prepare(`SELECT json_extract(s.value,'$.view.id') AS owner_id,json_extract(s.value,'$.view.revision') AS owner_revision,
+      json_extract(s.value,'$.view.matterId') AS matter_id,json_extract(s.value,'$.view.matterRevision') AS matter_revision
+      FROM messages m JOIN json_each(m.payload,'$.scenes') s WHERE m.id=? AND m.role='assistant'
+      AND json_extract(m.payload,'$.status')='done' AND json_extract(s.value,'$.kind')='curiosity'
+      AND json_extract(s.value,'$.id')=? AND json_extract(s.value,'$.revision')=?
+      AND json_extract(s.value,'$.view.origin')='created' AND json_extract(s.value,'$.source.sourceId')='work:self'
+      ${raw.sessionId ? 'AND m.session_id=?' : ''}
+      AND EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id
+        AND e.owner=? AND e.workspace=? AND e.subject=? AND e.world='real' AND e.status!='deleted')
+      AND NOT EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id AND (e.owner!=? OR e.workspace!=?))
+      AND NOT EXISTS(SELECT 1 FROM json_each(COALESCE(json_extract(m.payload,'$.contextReceipt.providedSourceIds'),'["history:self"]')) src
+        WHERE src.value NOT IN (SELECT value FROM json_each(?)))
+      AND json_type(s.value,'$.provenance.sourceBinding.sourceIds')='array'
+      AND json_type(s.value,'$.provenance.sourceBinding.requiredGrants')='array'
+      AND NOT EXISTS(SELECT 1 FROM json_each(s.value,'$.provenance.sourceBinding.sourceIds') src
+        WHERE src.type!='text' OR src.value NOT IN (SELECT value FROM json_each(?)))
+      AND NOT EXISTS(SELECT 1 FROM json_each(s.value,'$.provenance.sourceBinding.requiredGrants') permission
+        WHERE permission.type!='text' OR permission.value NOT IN (SELECT value FROM json_each(?))) LIMIT 1`)
+      .get(source.messageId, source.sceneId, source.sceneRevision, ...(raw.sessionId ? [raw.sessionId] : []),
+        scope.principalId, scope.workspaceId, scope.principalId, scope.principalId, scope.workspaceId,
+        JSON.stringify(scope.sources), JSON.stringify(scope.sources), JSON.stringify(scope.grants));
+    if (!row || [source.messageId, source.sceneId, row.owner_id, row.matter_id].some(id => typeof id !== 'string' || this.hasFence(id))
+      || !Number.isSafeInteger(row.owner_revision) || Number(row.owner_revision) < 1
+      || !Number.isSafeInteger(row.matter_revision) || Number(row.matter_revision) < 1) return;
+    return { origin: 'created' as const, owner: { id: String(row.owner_id), revision: Number(row.owner_revision),
+      matterId: String(row.matter_id), matterRevision: Number(row.matter_revision) } };
+  }
+
+  assistantHistoricalWorks(handle: ScopeHandle, options: AssistantHistoricalWorkOptions = {},
+    proofs: AssistantWorkProofState = { checked: new Map(), permits: options.permits, sessionId: options.sessionId }) {
+    return this.assistantHistoricalWorkPageValue(handle, options, proofs).items;
+  }
+  /** An already saved exact current work, not an invented checkpoint. Source
+   * permission is decided by the same original chapter getter before body. */
+  assistantCurrentWorkChapter(handle: ScopeHandle, options: { ownerId: string; ownerRevision: number; matterId: string;
+    matterRevision: number; sessionId?: string; permits?: (ref: WorkSourceRef) => boolean }) {
+    return this.assistantHistoricalWorks(handle, { ...options, order: 'newest', limit: 1 })[0];
+  }
+
+  /** Inherit exact Work metadata even when the caller returned only an address.
+   * This is a source dependency, never delivery/ACK of an original chapter. */
+  workAssistantWorkSources(handle: ScopeHandle, records: { id: string; revision: number }[]): AssistantWorkSource[] {
+    if (!records.length) return [];
+    const f = this.filter(handle), result: AssistantWorkSource[] = [];
+    for (const ref of records) {
+      const row = this.db.prepare(`SELECT r.revision,json_extract(r.payload,'$.data.type') AS type,
+        json_type(r.payload,'$.data.curiosityInvitation') AS curiosity,json_extract(r.payload,'$.sourceBinding') AS binding,
+        json_extract(r.payload,'$.data.assistantWorkSources') AS sources FROM h_work r WHERE ${f.sql} AND r.id=?`)
+        .get(...f.params, ref.id);
+      if (!row || !(row.type === 'curiosity_invitation' || row.type === 'collaboration_frame' && row.curiosity === 'true')) continue;
+      if (row.revision !== ref.revision || this.hasFence(ref.id)) throw new HarnessError('curiosity_changed', "The shared work has a later continuation. Reconnect to this section's current sources.");
+      let binding: unknown, sources: unknown;
+      try { binding = JSON.parse(String(row.binding)); sources = row.sources === null ? [] : JSON.parse(String(row.sources)); }
+      catch { throw new HarnessError('curiosity_history_changed', "The shared work's original chapter address cannot be connected completely."); }
+      if (!this.workBindingReadable(handle, binding) || !this.assistantWorkSourcesReadable(handle, sources))
+        throw new HarnessError('curiosity_history_changed', "A shared-work basis changed. The catalog address did not restore old text.");
+      result.push(...(sources as AssistantWorkSource[]));
+    }
+    return [...new Map(result.map(source => [canonical(source), source])).values()];
+  }
+
+  /** Position-only keyset navigation over the original saved chapters. Every
+   * page rechecks current sources; the cursor restores no prior permission. */
+  assistantHistoricalWorkPage(handle: ScopeHandle, options: { matterId?: string; ownerId?: string; sessionId?: string; query?: string;
+    order?: 'oldest' | 'newest'; cursor?: AssistantHistoricalWorkCursor; limit?: number; permits?: (ref: WorkSourceRef) => boolean } = {}) {
+    return this.assistantHistoricalWorkPageValue(handle, { ...options, limit: options.limit ?? 4 },
+      { checked: new Map(), permits: options.permits, sessionId: options.sessionId });
+  }
+
+  private assistantHistoricalWorkPageValue(handle: ScopeHandle, options: AssistantHistoricalWorkOptions, proofs: AssistantWorkProofState) {
+    const scope = this.scope(handle);
+    if (scope.audience !== 'self' || scope.subjectId !== scope.principalId || scope.worldId !== 'real'
+      || !scope.sources.includes('history:self') || !scope.sources.includes('work:self') || !scope.grants.includes('evidence:read'))
+      return { items: [], nextCursor: null, complete: true };
+    const cursor = options.cursor, ascending = options.order === 'oldest', direction = ascending ? 'ASC' : 'DESC', compare = ascending ? '>' : '<';
+    const limit = Math.max(1, Math.min(options.limit || 8, 12));
+    if (cursor && (!Number.isFinite(Date.parse(cursor.createdAt)) || typeof cursor.messageId !== 'string' || !cursor.messageId
+      || cursor.messageId.length > 160 || !Number.isSafeInteger(cursor.sceneIndex) || cursor.sceneIndex < 0)
+      || options.order !== undefined && !['oldest', 'newest'].includes(options.order))
+      throw new HarnessError('invalid_page', "The chapter position is invalid. Reopen the catalog from the original work.");
+    const candidates = this.db.prepare(`SELECT m.id AS message_id,m.session_id,json_extract(s.value,'$.id') AS scene_id,
+      json_extract(s.value,'$.revision') AS scene_revision,json_extract(s.value,'$.view.id') AS owner_id,
+      json_extract(s.value,'$.view.matterId') AS matter_id,json_extract(s.value,'$.provenance.sourceBinding') AS binding
+      FROM messages m JOIN json_each(m.payload,'$.scenes') s WHERE m.role='assistant'
+      AND json_extract(m.payload,'$.status')='done' AND json_extract(s.value,'$.kind')='curiosity'
+      AND json_extract(s.value,'$.view.origin')='created' AND json_extract(s.value,'$.source.sourceId')='work:self'
+      AND EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id
+        AND e.owner=? AND e.workspace=? AND e.subject=? AND e.world='real' AND e.status!='deleted')
+      AND NOT EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id AND (e.owner!=? OR e.workspace!=?))
+      AND NOT EXISTS(SELECT 1 FROM json_each(COALESCE(json_extract(m.payload,'$.contextReceipt.providedSourceIds'),'["history:self"]')) src
+        WHERE src.value NOT IN (SELECT value FROM json_each(?)))
+      ${options.messageId ? 'AND m.id=?' : ''} ${options.sceneId ? "AND json_extract(s.value,'$.id')=?" : ''}
+      ${options.sessionId ? 'AND m.session_id=?' : ''}
+      ${options.matterId ? "AND json_extract(s.value,'$.view.matterId')=?" : ''}
+      ${options.ownerId ? "AND json_extract(s.value,'$.view.id')=?" : ''}
+      ${options.ownerRevision === undefined ? '' : "AND json_extract(s.value,'$.view.revision')=?"}
+      ${options.matterRevision === undefined ? '' : "AND json_extract(s.value,'$.view.matterRevision')=?"}
+      ${options.sceneRevision === undefined ? '' : "AND json_extract(s.value,'$.revision')=?"}`)
+      .all(scope.principalId, scope.workspaceId, scope.principalId, scope.principalId, scope.workspaceId, JSON.stringify(scope.sources),
+        ...(options.messageId ? [options.messageId] : []), ...(options.sceneId ? [options.sceneId] : []),
+        ...(options.sessionId ? [options.sessionId] : []),
+        ...(options.matterId ? [options.matterId] : []), ...(options.ownerId ? [options.ownerId] : []),
+        ...(options.ownerRevision === undefined ? [] : [options.ownerRevision]), ...(options.matterRevision === undefined ? [] : [options.matterRevision]),
+        ...(options.sceneRevision === undefined ? [] : [options.sceneRevision]));
+    const messageIds = new Set(candidates.map(row => String(row.message_id)));
+    const metadata = new Map([...new Set(candidates.map(row => String(row.session_id)))].flatMap(sessionId =>
+      this.conversationPlanningMetadata(sessionId, messageIds).map(row => [row.id, row.value] as const)));
+    const allowed = candidates.filter(row => {
+      if ([row.message_id, row.scene_id, row.owner_id, row.matter_id].some(id => typeof id !== 'string' || this.hasFence(id))
+        || !metadata.has(String(row.message_id)) || !this.planningMessageReadable(handle, metadata.get(String(row.message_id))!, proofs)) return false;
+      try {
+        const binding = workSourceBindingSchema.safeParse(JSON.parse(String(row.binding)));
+        return binding.success && !binding.data.refs.some(ref => proofs.permits?.(ref) === false)
+          && this.workBindingReadable(handle, binding.data);
+      }
+      catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+    }).map(row => ({ messageId: row.message_id, sceneId: row.scene_id, revision: row.scene_revision }));
+    if (!allowed.length) return { items: [], nextCursor: null, complete: true };
+    const rows = this.db.prepare(`SELECT m.id AS message_id,m.session_id,m.created_at,CAST(s.key AS INTEGER) AS scene_index,s.value AS scene FROM messages m
+      JOIN json_each(m.payload,'$.scenes') s WHERE EXISTS(SELECT 1 FROM json_each(?) permit
+        WHERE json_extract(permit.value,'$.messageId')=m.id AND json_extract(permit.value,'$.sceneId')=json_extract(s.value,'$.id')
+          AND json_extract(permit.value,'$.revision')=json_extract(s.value,'$.revision'))
+      ${options.query ? "AND instr(lower(COALESCE(json_extract(s.value,'$.view.title'),'') || ' ' || COALESCE(json_extract(s.value,'$.view.opening'),'') || ' ' || COALESCE(json_extract(s.value,'$.view.experience'),'') || ' ' || COALESCE(json_extract(s.value,'$.view.firstMove'),'')),lower(?))>0" : ''}
+      ${cursor ? `AND (m.created_at ${compare} ? OR m.created_at=? AND (m.id ${compare} ? OR m.id=? AND CAST(s.key AS INTEGER) ${compare} ?))` : ''}
+      ORDER BY m.created_at ${direction},m.id ${direction},CAST(s.key AS INTEGER) ${direction} LIMIT ?`).all(JSON.stringify(allowed), ...(options.query ? [options.query] : []),
+        ...(cursor ? [cursor.createdAt, cursor.createdAt, cursor.messageId, cursor.messageId, cursor.sceneIndex] : []), limit + 1);
+    const more = rows.length > limit, page = rows.slice(0, limit), last = page.at(-1);
+    const items = page.flatMap(row => {
+      const scene = JSON.parse(String(row.scene)) as CuriosityScene;
+      const view = curiosityViewSchema.safeParse(scene.view), binding = workSourceBindingSchema.safeParse(scene.provenance?.sourceBinding);
+      if (!view.success || view.data.origin !== 'created' || !binding.success) return [];
+      this.access.push({ principalId: scope.principalId, scopeId: handle.id, purposes: scope.purposes,
+        source: 'history:self', objectId: String(row.message_id), kind: 'assistant_creation_original' });
+      return [{ messageId: String(row.message_id), sessionId: String(row.session_id), createdAt: String(row.created_at),
+        origin: 'shared_creation' as const, scene }];
+    });
+    return { items, nextCursor: more && last ? { createdAt: String(last.created_at), messageId: String(last.message_id), sceneIndex: Number(last.scene_index) } : null,
+      complete: !more };
+  }
+
+  private assistantHistoryEnvelope(handle: ScopeHandle, metadataOnly = false) {
+    const scope = this.scope(handle);
+    if (scope.audience !== 'self' || scope.subjectId !== scope.principalId || scope.worldId !== 'real' || !scope.sources.includes('history:self') || !scope.grants.includes('evidence:read')) return;
+    const permitted = `WITH permitted AS MATERIALIZED(
+      SELECT ${metadataOnly ? 'm.id,m.session_id,m.created_at' : 'm.*'},m.rowid AS message_order FROM messages m WHERE m.role='assistant' AND ${assistantReplyStatusSql()}
+      AND EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id AND e.owner=? AND e.workspace=? AND e.subject=? AND e.world='real' AND e.status!='deleted')
+      AND NOT EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id AND (e.owner!=? OR e.workspace!=?))
+      AND NOT EXISTS(SELECT 1 FROM json_each(COALESCE(json_extract(m.payload,'$.contextReceipt.providedSourceIds'),'["history:self"]')) src WHERE src.value NOT IN (SELECT value FROM json_each(?)))
+    )`;
+    return { scope, permitted, params: [scope.principalId, scope.workspaceId, scope.principalId, scope.principalId, scope.workspaceId,
+      JSON.stringify(scope.sources)] as SQLInputValue[] };
+  }
+  private assistantHistoryAnchor(handle: ScopeHandle, raw: WorkSourceRef, permits?: (ref: WorkSourceRef) => boolean) {
+    const ref = workSourceRefSchema.parse(raw), event = this.evidence(handle, ref.eventId);
+    if (!event || event.contentVersion !== ref.contentVersion || ref.end > Array.from(event.text).length
+      || permits?.(ref) === false) throw new HarnessError('history_anchor_changed', "This original statement changed. Continue from currently permitted originals.");
+    const row = this.db.prepare("SELECT session_id,created_at,rowid AS ordinal FROM messages WHERE id=? AND role='user' AND json_extract(payload,'$.status')='done'")
+      .get(event.id);
+    if (!row || row.session_id !== event.sessionId) return;
+    return { createdAt: String(row.created_at), ordinal: Number(row.ordinal), sessionId: String(row.session_id), ref };
+  }
+  /** The immediately preceding published reply, qualified like assistantHistory.
+   * SQL returns identity/count/status only; no prose, title or attached material
+   * enters this navigation result. An unreadable latest reply is not replaced
+   * by an older reply under the same "previous" identity. */
+  latestAssistantReplyIdentity(handle: ScopeHandle, sessionId: string, excludeIds: readonly string[] = []) {
+    const envelope = this.assistantHistoryEnvelope(handle, true);
+    if (!envelope || this.hasFence('history:self')) return;
+    const latest = this.db.prepare(`SELECT m.id FROM messages m WHERE m.session_id=? AND m.role='assistant'
+      AND ${assistantReplyStatusSql()} AND m.id NOT IN (SELECT value FROM json_each(?))
+      ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1`).get(sessionId, JSON.stringify(excludeIds));
+    return latest ? this.assistantReplyIdentity(handle, sessionId, String(latest.id)) : undefined;
+  }
+  /** Exact reply identity only, with the same current source qualification. */
+  assistantReplyIdentity(handle: ScopeHandle, sessionId: string, messageId: string, permits?: (ref: WorkSourceRef) => boolean,
+    proofs: AssistantWorkProofState = { checked: new Map(), permits }) {
+    const envelope = this.assistantHistoryEnvelope(handle, true);
+    if (!envelope || this.hasFence('history:self') || this.hasFence(messageId, 'history:self')) return;
+    const row = this.db.prepare(`${envelope.permitted} SELECT p.id,p.session_id,p.created_at,
+      note_codepoint_length(m.content) AS code_points,json_extract(m.payload,'$.status') AS reply_status
+      FROM permitted p JOIN messages m ON m.id=p.id WHERE p.id=? AND p.session_id=? LIMIT 1`)
+      .get(...envelope.params, messageId, sessionId);
+    if (!row || !Number.isSafeInteger(row.code_points) || Number(row.code_points) <= 0) return;
+    const source = this.conversationPlanningMetadata(sessionId, new Set([String(row.id)]))[0];
+    if (!source || !this.planningMessageReadable(handle, source.value, proofs)) return;
+    return { messageId: String(row.id), sessionId: String(row.session_id), createdAt: String(row.created_at),
+      codePoints: Number(row.code_points), status: String(row.reply_status), bodyProvided: false as const,
+      ...assistantReplyState(row.reply_status) };
+  }
+  /** One explicit navigation step. Qualify the anchor and its immediate prior
+   * published reply; never jump across an unreadable reply to an older one. */
+  previousAssistantReplyIdentity(handle: ScopeHandle, sessionId: string, anchorMessageId: string) {
+    if (!this.assistantReplyIdentity(handle, sessionId, anchorMessageId)) return;
+    const previous = this.db.prepare(`SELECT m.id FROM messages m JOIN messages anchor ON anchor.id=? AND anchor.session_id=m.session_id
+      WHERE m.session_id=? AND m.role='assistant' AND ${assistantReplyStatusSql()}
+      AND (m.created_at<anchor.created_at OR (m.created_at=anchor.created_at AND m.rowid<anchor.rowid))
+      ORDER BY m.created_at DESC,m.rowid DESC LIMIT 1`).get(anchorMessageId, sessionId);
+    return previous ? this.assistantReplyIdentity(handle, sessionId, String(previous.id)) : undefined;
+  }
+  /** Local source for the narrow text navigator. Qualify metadata before
+   * selecting prose, and return no Scene/material projections. The caller
+   * exposes only locator metadata or its separately approved exact window. */
+  assistantTextForLocalRead(handle: ScopeHandle, sessionId: string, messageId: string,
+    purpose: 'locate' | 'passage', permits?: (ref: WorkSourceRef) => boolean) {
+    const envelope = this.assistantHistoryEnvelope(handle, true);
+    if (!envelope || this.hasFence(messageId, 'history:self') || this.hasFence('history:self')) return;
+    const identity = this.db.prepare(`${envelope.permitted} SELECT id,session_id,created_at FROM permitted WHERE id=? AND session_id=? LIMIT 1`)
+      .get(...envelope.params, messageId, sessionId);
+    if (!identity) return;
+    const source = this.conversationPlanningMetadata(sessionId, new Set([messageId]))[0];
+    if (!source || !this.planningMessageReadable(handle, source.value, { checked: new Map(), permits })) return;
+    const body = this.db.prepare(`SELECT m.content,json_extract(m.payload,'$.status') AS reply_status FROM messages m
+      WHERE m.id=? AND m.session_id=? AND m.role='assistant' AND ${assistantReplyStatusSql()} LIMIT 1`).get(messageId, sessionId);
+    if (!body) return;
+    this.recordAccess(handle, { id: messageId, source: 'history:self' }, 'assistant_text_' + purpose);
+    return { id: messageId, sessionId, createdAt: String(identity.created_at), text: String(body.content),
+      assistantTextSources: (source.value.contextReceipt.assistantTextSources || []) as AssistantTextReference[],
+      authority: 'assistant_history_not_user_fact' as const, ...assistantReplyState(body.reply_status) };
+  }
+  /** Qualify one published reply position without projecting its prose. The
+   * local hash scan cannot lend a model the rest of the reply or its Scenes. */
+  assistantTextReferenceIdentity(handle: ScopeHandle, sessionId: string, raw: AssistantTextReference,
+    permits?: (ref: WorkSourceRef) => boolean, proofs: AssistantWorkProofState = { checked: new Map(), permits }) {
+    const reference = assistantTextReferenceSchema.parse(raw);
+    if (reference.sessionId !== sessionId)
+      throw new HarnessError('assistant_text_session', "This explanation is outside the current conversation. Select it in its original conversation before continuing.");
+    this.scope(handle);
+    const temporary = this.db.prepare("SELECT json_extract(value,'$.retention') AS retention FROM meta WHERE key=?")
+      .get('conversation-policy:' + sessionId);
+    if (temporary?.retention === 'session_only')
+      throw new HarnessError('assistant_text_unavailable', "This explanation has no reconnectable saved original response. The current question can still continue.");
+    const identity = this.assistantReplyIdentity(handle, sessionId, reference.messageId, permits, proofs);
+    if (!identity) throw new HarnessError('assistant_text_unavailable', "This explanation cannot reconnect to its original response now. Select it again at the original place.");
+    const body = this.db.prepare(`SELECT content,json_extract(payload,'$.responseText') AS response_text,
+      json_extract(payload,'$.retention') AS retention FROM messages
+      WHERE id=? AND session_id=? AND role='assistant' AND ${assistantReplyStatusSql('messages')} LIMIT 1`)
+      .get(reference.messageId, sessionId);
+    if (!body || body.retention === 'session_only')
+      throw new HarnessError('assistant_text_unavailable', "This explanation has no reconnectable saved original response. The current question can still continue.");
+    const content = String(body.content), response = typeof body.response_text === 'string' ? body.response_text : content;
+    const total = Array.from(response).length;
+    // The rendered response is the exact prefix before separately authored
+    // release drafts. A DOM selection cannot name hidden appended material.
+    if (!content.startsWith(response) || createHash('sha256').update(content).digest('hex') !== reference.contentSha256
+      || reference.end > total)
+      throw new HarnessError('assistant_text_changed', "This explanation's text or position changed. Select it again in the original response.");
+    this.scope(handle);
+    return { reference, createdAt: identity.createdAt, total, authority: 'assistant_history_not_user_fact' as const,
+      bodyProvided: false as const, ...(identity.replyState ? { replyState: identity.replyState } : {}) };
+  }
+  /** Reuse the current history owner, then deliver only the selected Unicode
+   * window. This is a continuation of her words, never a reusable fact table. */
+  readAssistantTextReference(handle: ScopeHandle, sessionId: string, raw: AssistantTextReference,
+    permits?: (ref: WorkSourceRef) => boolean) {
+    const identity = this.assistantTextReferenceIdentity(handle, sessionId, raw, permits), reference = identity.reference;
+    const body = this.assistantTextForLocalRead(handle, sessionId, reference.messageId, 'passage', permits);
+    if (!body || createHash('sha256').update(body.text).digest('hex') !== reference.contentSha256)
+      throw new HarnessError('assistant_text_changed', "This explanation changed recently. Select it again in the original response; your question remains.");
+    this.scope(handle);
+    return { ...identity, origin: 'assistant_reply' as const, bodyProvided: true as const,
+      text: codePointSlice(body.text, reference.start, reference.end),
+      coverage: { start: reference.start, end: reference.end, total: identity.total },
+      meaning: "This is a small passage you previously said and the user is pointing to now. Continue from it; actual sources and action progress retain their own original basis." };
+  }
+  /** Recheck direct continuation roots, including their existing derived
+   * permissions. Call-local cycle guards never become stored authority. */
+  assistantTextSourcesReadable(handle: ScopeHandle, raw: unknown,
+    proofs: AssistantWorkProofState = { checked: new Map() }): boolean {
+    if (raw === undefined) return true;
+    if (!Array.isArray(raw) || raw.length > 128) return false;
+    return raw.every(value => {
+      const parsed = assistantTextReferenceSchema.safeParse(value);
+      if (!parsed.success) return false;
+      const reference = parsed.data, key = 'assistant_text:' + canonical(reference), previous = proofs.checked.get(key);
+      if (previous !== undefined) return previous === true;
+      proofs.checked.set(key, 'checking');
+      try {
+        this.assistantTextReferenceIdentity(handle, reference.sessionId, reference, proofs.permits, proofs);
+        proofs.checked.set(key, true);
+        return true;
+      } catch (error) {
+        proofs.checked.set(key, false);
+        if (!(error instanceof HarnessError || error instanceof z.ZodError)) throw error;
+        return false;
+      }
+    });
+  }
+  /** Inherit only the original addresses of replies actually supplied by the
+   * normal history owner; this lookup selects neither prose nor Scene bodies. */
+  conversationAssistantTextSources(handle: ScopeHandle, sessionId: string, messageIds: string[]): AssistantTextReference[] {
+    const scope = this.scope(handle);
+    if (!scope.sources.includes('history:self') || !scope.grants.includes('evidence:read') || scope.audience !== 'self'
+      || scope.subjectId !== scope.principalId || scope.worldId !== 'real') return [];
+    const sources: AssistantTextReference[] = [];
+    if (!messageIds.length) return sources;
+    for (const row of this.conversationPlanningMetadata(sessionId, new Set(messageIds))) {
+      if (!this.planningMessageReadable(handle, row.value))
+        throw new HarnessError('workspace_context_changed', "A source in the explanation just read changed. Old text was not reattached.");
+      const raw = row.value.contextReceipt.assistantTextSources;
+      if (raw !== undefined) sources.push(...(raw as unknown[]).map(value => assistantTextReferenceSchema.parse(value)));
+    }
+    return [...new Map(sources.map(source => [canonical(source), source])).values()];
+  }
+  /** Navigation qualification only. Select no reply/scene body and record no
+   * assistant read. Exact body provenance is still checked by assistantHistory. */
+  hasAssistantHistoryContext(handle: ScopeHandle, ref: WorkSourceRef, permits?: (ref: WorkSourceRef) => boolean) {
+    const envelope = this.assistantHistoryEnvelope(handle, true);
+    if (!envelope) return false;
+    const anchor = this.assistantHistoryAnchor(handle, ref, permits);
+    if (!anchor) return false;
+    return !!this.db.prepare(`${envelope.permitted} SELECT 1 FROM permitted WHERE session_id=?
+      AND (created_at!=? OR message_order!=?) LIMIT 1`)
+      .get(...envelope.params, anchor.sessionId, anchor.createdAt, anchor.ordinal);
+  }
+  assistantHistory(handle: ScopeHandle, options: { id?: string; query?: string; aroundSource?: WorkSourceRef; limit?: number; permits?: (ref: WorkSourceRef) => boolean }) {
+    const envelope = this.assistantHistoryEnvelope(handle);
+    if (!envelope) return [];
+    const { scope, permitted } = envelope;
+    const anchor = options.aroundSource ? this.assistantHistoryAnchor(handle, options.aroundSource, options.permits) : undefined;
+    if (options.aroundSource && !anchor) return [];
+    const match = options.id ? 'id=?' : 'instr(lower(content),lower(?))>0';
+    const params = [...envelope.params, options.id || options.query || ''];
+    // Inspect only source metadata before selecting any matching reply body.
+    const candidates = anchor ? (['before', 'after'] as const).flatMap(side => {
+      const comparison = side === 'before' ? '<' : '>', direction = side === 'before' ? 'DESC' : 'ASC';
+      return this.db.prepare(`${permitted} SELECT id,session_id FROM permitted WHERE session_id=?
+        AND (created_at${comparison}? OR (created_at=? AND message_order${comparison}?))
+        ORDER BY created_at ${direction},message_order ${direction} LIMIT 4`)
+        .all(...params.slice(0, -1), anchor.sessionId, anchor.createdAt, anchor.createdAt, anchor.ordinal);
+    }) : this.db.prepare(`${permitted} SELECT id,session_id FROM permitted WHERE ${match}`).all(...params);
+    const proofs: AssistantWorkProofState = { checked: new Map(), permits: options.permits };
+    const works = anchor ? candidates.flatMap(row => this.assistantHistoricalWorks(handle, { messageId: String(row.id), limit: 12 }, proofs))
+      : this.assistantHistoricalWorks(handle, { messageId: options.id, query: options.id ? undefined : options.query, limit: 12 }, proofs);
+    const selected = new Set([...candidates.map(row => String(row.id)), ...works.map(work => work.messageId)]);
+    const metadata = new Map([...new Set([...candidates.map(row => String(row.session_id)), ...works.map(work => work.sessionId)])].flatMap(sessionId =>
+      this.conversationPlanningMetadata(sessionId).filter(row => selected.has(row.id)).map(row => [row.id, row.value] as const)));
+    const denied = [...metadata].filter(([, value]) => !this.planningMessageReadable(handle, value, proofs)).map(([id]) => id);
+    const rows = this.db.prepare(`${permitted} SELECT id,session_id,content,created_at,message_order,json_extract(payload,'$.status') AS reply_status FROM permitted WHERE id IN (SELECT value FROM json_each(?))
+      AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY created_at DESC,message_order DESC LIMIT ?`).all(...params.slice(0, -1), JSON.stringify([...selected]), JSON.stringify(denied), Math.max(1, Math.min(options.limit || 8, 12)));
+    for (const row of rows) this.access.push({ principalId: scope.principalId, scopeId: handle.id, purposes: scope.purposes, source: 'history:self', objectId: String(row.id), kind: 'assistant_original' });
+    return rows.map(row => {
+      const receipt = metadata.get(String(row.id))?.contextReceipt;
+      const chapters = works.filter(work => work.messageId === row.id);
+      const bindings = [...this.conversationWorkSourceBindings(handle, String(row.session_id), [String(row.id)]),
+        ...chapters.map(work => work.scene.provenance.sourceBinding)];
+      const chapterSources = [...this.conversationAssistantWorkSources(handle, String(row.session_id), [String(row.id)]),
+        ...chapters.map(work => ({ messageId: work.messageId, sceneId: work.scene.id, sceneRevision: work.scene.revision }))];
+      return { id: String(row.id), sessionId: String(row.session_id), text: String(row.content), createdAt: String(row.created_at), authority: 'assistant_history_not_user_fact',
+        ...assistantReplyState(row.reply_status),
+        ...(anchor ? { position: String(row.created_at) < anchor.createdAt || String(row.created_at) === anchor.createdAt && Number(row.message_order) < anchor.ordinal
+          ? 'before_anchor' as const : 'after_anchor' as const, anchorSource: anchor.ref } : {}),
+        historicalWorks: chapters.map(({ scene, messageId }) => ({ kind: 'curiosity_chapter' as const, messageId,
+          sceneId: scene.id, sceneRevision: scene.revision, origin: 'shared_creation' as const, title: scene.view.title,
+          fields: (['opening', 'experience', 'firstMove'] as const).map(field => ({ field, length: Array.from(scene.view[field]).length })),
+          owner: { id: scene.view.id, revision: scene.view.revision, matterId: scene.view.matterId, matterRevision: scene.view.matterRevision },
+          read: { tool: 'read_shared_creation', arguments: { messageId, sceneId: scene.id, sceneRevision: scene.revision } } })),
+        workSourceBindings: [...new Map(bindings.map(binding => [canonical(binding), binding])).values()],
+        assistantWorkSources: [...new Map(chapterSources.map(source => [canonical(source), source])).values()],
+        planningProvenance: this.conversationPlanningProvenance(handle, String(row.session_id), [String(row.id)]),
+        historicalAssertionVersions: (receipt?.historicalAssertionVersions || []) as { id: string; revision: number }[],
+        learningProcessVersions: (receipt?.learningProcessVersions || []) as { id: string; revision: number }[],
+        reflectiveLetterSources: this.conversationReflectiveLetterSources(handle, String(row.session_id), [String(row.id)]),
+        releaseSources: this.conversationReleaseSources(handle, String(row.session_id), [String(row.id)]) };
+    });
+  }
+  /** Exact published co-work page. This route never enters the story directory,
+   * returns a fabricated former Work revision, or revives former controls. */
+  assistantCoWorkScene(handle: ScopeHandle, raw: AssistantWorkSource,
+    options: { sessionId?: string; permits?: (ref: WorkSourceRef) => boolean } = {},
+    proofs: AssistantWorkProofState = { checked: new Map(), permits: options.permits, sessionId: options.sessionId }) {
+    const source = assistantWorkSourceSchema.parse(raw), scope = this.scope(handle);
+    if (scope.audience !== 'self' || scope.subjectId !== scope.principalId || scope.worldId !== 'real'
+      || !scope.sources.includes('history:self') || !scope.sources.includes('work:self') || !scope.grants.includes('evidence:read')
+      || this.hasFence(source.messageId) || this.hasFence(source.sceneId) || !this.projectAssistantCoWorkScene || !this.verifyCompanionSnapshotMetadata) return;
+    const row = this.db.prepare(`SELECT m.session_id,m.created_at,json_extract(m.payload,'$.contextReceipt') AS receipt,
+      json_extract(scene.value,'$.createdAt') AS scene_created_at,json_extract(scene.value,'$.matter.revision') AS matter_revision,
+      json_extract(scene.value,'$.matter.needsReview') AS matter_review,
+      json_extract(scene.value,'$.matter.id') AS matter_id,json_extract(scene.value,'$.provenance.sourceBinding') AS binding,
+      json_extract(scene.value,'$.modules') AS modules,
+      (SELECT json_group_array(json_object('id',json_extract(c.value,'$.id'),'revision',json_extract(c.value,'$.revision'),
+        'matterId',json_extract(c.value,'$.matterId'),'matterRevision',json_extract(c.value,'$.matterRevision'),
+        'snapshotProof',json_extract(c.value,'$.snapshotProof'))) FROM json_each(scene.value,'$.coWork') c) AS owners
+      FROM messages m,json_each(m.payload,'$.scenes') scene WHERE m.id=? AND m.role='assistant'
+      AND json_extract(m.payload,'$.status')='done' AND json_extract(scene.value,'$.kind')='discussion'
+      AND json_extract(scene.value,'$.source.sourceId')='work:self'
+      AND json_extract(scene.value,'$.id')=? AND json_extract(scene.value,'$.revision')=?
+      ${options.sessionId ? 'AND m.session_id=?' : ''}
+      AND EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id
+        AND e.owner=? AND e.workspace=? AND e.subject=? AND e.world='real' AND e.status!='deleted')
+      AND NOT EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id AND (e.owner!=? OR e.workspace!=?))
+      AND NOT EXISTS(SELECT 1 FROM json_each(COALESCE(json_extract(m.payload,'$.contextReceipt.providedSourceIds'),'["history:self"]')) src
+        WHERE src.value NOT IN (SELECT value FROM json_each(?))) LIMIT 1`).get(source.messageId, source.sceneId, source.sceneRevision,
+        ...(options.sessionId ? [options.sessionId] : []), scope.principalId, scope.workspaceId, scope.principalId, scope.principalId,
+        scope.workspaceId, JSON.stringify(scope.sources));
+    if (!row || typeof row.matter_id !== 'string' || this.hasFence(row.matter_id)) return;
+    try {
+      const binding = workSourceBindingSchema.parse(JSON.parse(String(row.binding)));
+      const moduleValues: unknown = JSON.parse(String(row.modules)), ownerValues: unknown = JSON.parse(String(row.owners));
+      if (!Array.isArray(moduleValues) || !Array.isArray(ownerValues)) return;
+      const modules = moduleValues.map(value => discussionModuleRefSchema.parse(value));
+      const owners = ownerValues.map(value => {
+        const header = value as Record<string, unknown>;
+        return companionSceneProjectionSchema.pick({ id: true, revision: true, matterId: true, matterRevision: true, snapshotProof: true })
+          .parse({ ...header, snapshotProof: header.snapshotProof ?? undefined });
+      });
+      if (!owners.length || owners.length > 8 || modules.length > 8 || owners.some(owner => !owner.snapshotProof) || !this.workBindingsReadable(handle, [binding])
+        || binding.refs.some(ref => options.permits?.(ref) === false)
+        || !this.planningMessageReadable(handle, { contextReceipt: JSON.parse(String(row.receipt)), scenes: [{ kind: 'discussion',
+          sessionId: String(row.session_id), createdAt: String(row.scene_created_at), matter: { id: row.matter_id,
+            revision: Number(row.matter_revision), needsReview: row.matter_review === 1 }, provenance: { sourceBinding: binding }, coWork: owners }] }, proofs)
+        || owners.some(owner => {
+          const module = modules.find(module => module.owner === 'co_work' && module.id === owner.id && module.revision === owner.revision
+            && module.matterId === owner.matterId);
+          return !module || owner.matterId !== row.matter_id
+            || module.sourceBinding.refs.some(ref => options.permits?.(ref) === false)
+            || !this.workBindingsReadable(handle, [module.sourceBinding])
+            || owner.snapshotProof && canonical(owner.snapshotProof.sourceBinding) !== canonical(module.sourceBinding)
+            || this.verifyCompanionSnapshotMetadata?.(handle, owner, options.permits) !== true;
+        })) return;
+      // Only this original Scene body is selected after its source/owner proof.
+      const body = this.db.prepare(`SELECT scene.value AS scene FROM messages m,json_each(m.payload,'$.scenes') scene
+        WHERE m.id=? AND json_extract(scene.value,'$.id')=? AND json_extract(scene.value,'$.revision')=? LIMIT 1`)
+        .get(source.messageId, source.sceneId, source.sceneRevision);
+      if (!body) return;
+      const scene = this.projectAssistantCoWorkScene(handle, JSON.parse(String(body.scene)) as DiscussionScene, options.permits);
+      if (scene.id !== source.sceneId || scene.revision !== source.sceneRevision || scene.sessionId !== row.session_id) return;
+      const projected = { ...scene, coWork: scene.coWork.map(value => ({ ...value, historySource: source })) };
+      this.access.push({ principalId: scope.principalId, scopeId: handle.id, purposes: scope.purposes,
+        source: 'history:self', objectId: source.messageId, kind: 'assistant_cowork_original' });
+      return { messageId: source.messageId, sessionId: String(row.session_id), createdAt: String(row.created_at), scene: projected,
+        bindings: [binding, ...modules.map(module => module.sourceBinding)] };
+    } catch (error) {
+      if (error instanceof HarnessError || error instanceof SyntaxError || error instanceof Error && error.name === 'ZodError') return;
+      throw error;
+    }
+  }
+
+  /** Pre-control-parser identity only. No explanation, quote, material body or
+   * source-proof body is selected, and this return grants no reading right. */
+  assistantCoWorkIdentity(handle: ScopeHandle, raw: AssistantWorkSource, options: { sessionId?: string } = {}) {
+    const source = assistantWorkSourceSchema.parse(raw), scope = this.scope(handle);
+    if (scope.subjectId !== scope.principalId || scope.worldId !== 'real' || scope.audience !== 'self'
+      || !scope.sources.includes('history:self') || !scope.sources.includes('work:self') || !scope.grants.includes('evidence:read')
+      || this.hasFence(source.messageId) || this.hasFence(source.sceneId)) return [];
+    const rows = this.db.prepare(`SELECT json_extract(c.value,'$.id') AS id,json_extract(c.value,'$.revision') AS revision,
+      json_extract(c.value,'$.matterId') AS matter_id,json_extract(c.value,'$.matterRevision') AS matter_revision
+      FROM messages m,json_each(m.payload,'$.scenes') scene,json_each(scene.value,'$.coWork') c
+      WHERE m.id=? AND m.role='assistant' AND json_extract(m.payload,'$.status')='done'
+      AND json_extract(scene.value,'$.kind')='discussion' AND json_extract(scene.value,'$.source.sourceId')='work:self'
+      AND json_extract(scene.value,'$.id')=? AND json_extract(scene.value,'$.revision')=?
+      ${options.sessionId ? 'AND m.session_id=?' : ''}
+      AND EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id
+        AND e.owner=? AND e.workspace=? AND e.subject=? AND e.world='real' AND e.status!='deleted')
+      AND NOT EXISTS(SELECT 1 FROM h_evidence e WHERE json_extract(e.payload,'$.sessionId')=m.session_id AND (e.owner!=? OR e.workspace!=?))
+      AND NOT EXISTS(SELECT 1 FROM json_each(scene.value,'$.provenance.sourceBinding.sourceIds') src
+        WHERE src.type!='text' OR src.value NOT IN (SELECT value FROM json_each(?)))
+      AND NOT EXISTS(SELECT 1 FROM json_each(scene.value,'$.provenance.sourceBinding.requiredGrants') permission
+        WHERE permission.type!='text' OR permission.value NOT IN (SELECT value FROM json_each(?))) LIMIT 8`)
+      .all(source.messageId, source.sceneId, source.sceneRevision, ...(options.sessionId ? [options.sessionId] : []),
+        scope.principalId, scope.workspaceId, scope.principalId, scope.principalId, scope.workspaceId, JSON.stringify(scope.sources), JSON.stringify(scope.grants));
+    return rows.filter(row => typeof row.id === 'string' && typeof row.matter_id === 'string' && !this.hasFence(row.id)
+      && !this.hasFence(row.matter_id) && Number.isSafeInteger(row.revision) && Number(row.revision) > 0
+      && Number.isSafeInteger(row.matter_revision) && Number(row.matter_revision) > 0)
+      .map(row => ({ id: String(row.id), revision: Number(row.revision), matterId: String(row.matter_id), matterRevision: Number(row.matter_revision) }));
+  }
+
+  /** Metadata inheritance of the exact original sources already accepted by
+   * the common gate. It makes no chapter/body read or acknowledgement claim. */
+  assistantWorkSourceBindings(handle: ScopeHandle, sources: AssistantWorkSource[]): WorkSourceBinding[] {
+    if (!this.assistantWorkSourcesReadable(handle, sources)) throw new HarnessError('assistant_work_changed', "The original work or shared page's sources changed.");
+    const bindings = sources.flatMap(source => {
+      const row = this.db.prepare(`SELECT json_extract(scene.value,'$.provenance.sourceBinding') AS binding,
+        json_extract(scene.value,'$.modules') AS modules FROM messages m,json_each(m.payload,'$.scenes') scene
+        WHERE m.id=? AND json_extract(scene.value,'$.id')=? AND json_extract(scene.value,'$.revision')=? LIMIT 1`)
+        .get(source.messageId, source.sceneId, source.sceneRevision);
+      if (!row) return [];
+      return [workSourceBindingSchema.parse(JSON.parse(String(row.binding))), ...(row.modules === null ? []
+        : JSON.parse(String(row.modules)).map((module: unknown) => discussionModuleRefSchema.parse(module).sourceBinding))];
+    });
+    return [...new Map(bindings.map(binding => [canonical(binding), binding])).values()];
+  }
+
+  collaborationPage(handle: ScopeHandle, sessionId: string, query = '', offset = 0, limit = 8) {
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 20)
+      throw new HarnessError('invalid_page', "The matter pagination range is invalid.");
+    const terms = [...new Set(query.normalize('NFKC').trim().toLowerCase().split(/\s+/).filter(Boolean))];
+    if (terms.length > 16) throw new HarnessError('invalid_query', "Too many search terms. Narrow the query.");
+    const f = this.filter(handle), e = this.filter(handle, 'e'), bindings = this.workSourceFilter(handle);
+    const permitted = `WITH permitted AS MATERIALIZED(
+      SELECT r.*,r.rowid AS work_order FROM h_work r WHERE ${f.sql} AND ${bindings.sql}
+      AND COALESCE(json_extract(r.payload,'$.data.type'),'')!='planning_intent'
+      AND (json_extract(r.payload,'$.data.type') IN ('collaboration_frame','request_item') OR r.kind IN ('goal','plan','commitment'))
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.evidenceIds') ref WHERE NOT EXISTS(SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted'))
+      ${terms.length ? '' : "AND (json_extract(r.payload,'$.data.sessionId')=? OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sessionIds') s WHERE s.value=?))"}
+    ), matching AS (SELECT * FROM permitted r ${terms.length ? 'WHERE ' + terms.map(() => "instr(lower(r.title || ' ' || r.payload),?)>0").join(' OR ') : ''})`;
+    const params = [...f.params, ...bindings.params, ...e.params, ...(terms.length ? terms : [sessionId, sessionId])];
+    const total = Number(this.db.prepare(`${permitted} SELECT count(*) AS total FROM matching`).get(...params)?.total || 0);
+    const rows = this.db.prepare(`${permitted} SELECT * FROM matching ORDER BY work_order DESC LIMIT ? OFFSET ?`).all(...params, limit, offset);
+    for (const row of rows) this.recordAccess(handle, row, 'collaboration_restore');
+    return { items: rows.map(row => parse<WorkRecord>(row)!), total, nextOffset: offset + rows.length < total ? offset + rows.length : null };
+  }
+  requestItems(handle: ScopeHandle, sessionId: string, openOnly = false): WorkRecord[] {
+    const f = this.filter(handle), e = this.filter(handle, 'e'), bindings = this.workSourceFilter(handle);
+    const rows = this.db.prepare(`SELECT r.* FROM h_work r WHERE ${f.sql} AND ${bindings.sql} AND r.kind='task'
+      AND json_extract(r.payload,'$.data.type')='request_item'
+      AND (json_extract(r.payload,'$.data.sessionId')=? OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sessionIds') s WHERE s.value=?))
+      ${openOnly ? "AND json_extract(r.payload,'$.data.state') NOT IN ('answered','succeeded','withdrawn','unfulfilled')" : ''}
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.evidenceIds') ref WHERE NOT EXISTS(SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted'))
+      ORDER BY r.rowid DESC LIMIT 200`).all(...f.params, ...bindings.params, sessionId, sessionId, ...e.params);
+    for (const row of rows) this.recordAccess(handle, row, 'current_requests');
+    return rows.map(row => parse<WorkRecord>(row)!);
+  }
+
+  /**
+   * Scoped episode projection for conversation-frame recovery.  Keeping this
+   * on the repository makes the scope/deletion fence rules identical to all
+   * other work reads; callers never need a second profile or user database.
+   */
+  conversationFrames(
+    handle: ScopeHandle,
+    options: { sessionId?: string; anchorKey?: string; includeClosed?: boolean; limit?: number } = {},
+  ): WorkRecord[] {
+    const records = this.work(handle, 'episode').filter((episode) => {
+      if (!options.includeClosed && ['closed', 'cancelled', 'stale', 'blocked'].includes(episode.status))
+        return false;
+      if (options.sessionId) {
+        const sessions = Array.isArray(episode.data.sessionIds)
+          ? (episode.data.sessionIds as string[])
+          : typeof episode.data.sessionId === 'string'
+            ? [episode.data.sessionId]
+            : [];
+        if (!sessions.includes(options.sessionId)) return false;
+      }
+      if (options.anchorKey && episode.data.anchorKey !== options.anchorKey) return false;
+      return true;
+    });
+    return records
+      .sort((a, b) => Number(b.data.focusSequence || 0) - Number(a.data.focusSequence || 0))
+      .slice(0, Math.min(options.limit || 32, 100));
+  }
+  currentMatter(handle: ScopeHandle, sessionId: string) {
+    const f = this.filter(handle), e = this.filter(handle, 'e'), bindings = this.workSourceFilter(handle);
+    const row = this.db.prepare(`SELECT r.id,r.title,r.revision,r.status,r.payload,json_extract(r.payload,'$.data.question') AS question,json_extract(r.payload,'$.data.nextStep') AS next_step,json_extract(r.payload,'$.data.updatedAt') AS updated_at
+      FROM h_work r WHERE ${f.sql} AND ${bindings.sql} AND r.kind='episode' AND r.status='active'
+      AND (json_extract(r.payload,'$.data.sessionId')=? OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sessionIds') s WHERE s.value=?))
+      AND NOT EXISTS(SELECT 1 FROM json_each(r.payload,'$.evidenceIds') ref WHERE NOT EXISTS(SELECT 1 FROM h_evidence e WHERE e.id=ref.value AND ${e.sql} AND e.status!='deleted'))
+      ORDER BY r.rowid DESC LIMIT 1`).get(...f.params, ...bindings.params, sessionId, sessionId, ...e.params);
+    if (!row) return null;
+    this.recordAccess(handle, { ...row, source: 'work:self' }, 'current_matter');
+    const frame = parse<WorkRecord>(row);
+    const optionIds = Array.isArray(frame?.data.optionIds) ? frame.data.optionIds.slice(0, 8) : [];
+    const optionPlaces = optionIds.flatMap(id => typeof id === 'string' ? this.work(handle, undefined, id) : [])
+      .filter(option => option.data.type !== 'planning_intent' && option.data.episodeId === row.id && ['option', 'plan'].includes(option.kind)
+        && !['rejected', 'blocked', 'stale', 'cancelled'].includes(option.status) && typeof option.data.placeId === 'string')
+      .map(option => ({ id: option.id, title: option.title, placeId: String(option.data.placeId), revision: option.revision }));
+    return { id: String(row.id), title: String(row.title), revision: Number(row.revision), question: row.question || null, nextStep: row.next_step || null, updatedAt: row.updated_at || null,
+      optionPlaces, optionPlacesMeaning: "These are candidate place IDs and revisions recorded in the current matter. They do not establish anyone's current location; routes and entrances need actual queries.",
+      meaning: "This is a bounded index of unfinished matters, not complete content. Use restore_collaboration for full decisions, conditions and originals. Ignore irrelevant entries; the current statement takes precedence." };
+  }
+  addDependency(handle: ScopeHandle, d: Dependency) {
+    this.scope(handle);
+    const cycle = this.db
+      .prepare(
+        `WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT producer_id FROM h_dependencies JOIN chain ON consumer_id=chain.id) SELECT id FROM chain WHERE id=?`,
+      )
+      .get(d.producerId, d.consumerId);
+    if (cycle) throw new HarnessError('dependency_cycle', "Dependencies form a cycle.");
+    this.db
+      .prepare(
+        'INSERT INTO h_dependencies VALUES(?,?,?,?,?) ON CONFLICT(consumer_id,producer_id) DO UPDATE SET producer_revision=excluded.producer_revision,sensitivity=excluded.sensitivity,invalidation=excluded.invalidation',
+      )
+      .run(d.consumerId, d.producerId, d.producerRevision, d.sensitivity, d.invalidation);
+  }
+  dependencies(consumerId: string): Dependency[] {
+    return this.db
+      .prepare(
+        'SELECT consumer_id AS consumerId,producer_id AS producerId,producer_revision AS producerRevision,sensitivity,invalidation FROM h_dependencies WHERE consumer_id=?',
+      )
+      .all(consumerId) as unknown as Dependency[];
+  }
+  invalidate(producerId: string, reason = 'dependency_changed', preserved: ReadonlySet<string> = new Set()): string[] {
+    return this.write(() => {
+      const affected: string[] = [],
+        queue = [producerId],
+        seen = new Set<string>();
+      while (queue.length) {
+        const id = queue.shift()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (seen.size > 2000) throw new HarnessError('dependency_budget', "Dependency expansion exceeds its limit. This update is paused.");
+        for (const row of this.db.prepare('SELECT * FROM h_dependencies WHERE producer_id=?').all(id)) {
+          const consumer = String(row.consumer_id);
+          if (preserved.has(consumer)) continue;
+          affected.push(consumer);
+          queue.push(consumer);
+          const world = parse<any>(this.db.prepare('SELECT payload FROM h_worlds WHERE id=?').get(consumer));
+          if (world) {
+            world.status = 'stale';
+            world.invalidationReason = reason;
+            this.db
+              .prepare("UPDATE h_worlds SET status='stale',payload=? WHERE id=?")
+              .run(JSON.stringify(world), consumer);
+          }
+          const work = parse<WorkRecord>(
+            this.db.prepare('SELECT payload FROM h_work WHERE id=?').get(consumer),
+          );
+          if (work) {
+            work.status = row.invalidation === 'block' ? 'blocked' : 'stale';
+            work.revision++;
+            work.data = { ...work.data, invalidationReason: reason };
+            this.db
+              .prepare('UPDATE h_work SET status=?,revision=?,payload=? WHERE id=?')
+              .run(work.status, work.revision, JSON.stringify(work), consumer);
+          }
+          const action = parse<any>(
+            this.db.prepare('SELECT payload FROM h_actions WHERE id=?').get(consumer),
+          );
+          if (action) {
+            action.status = ['dispatching', 'outcome_unknown', 'reconciling', 'succeeded'].includes(
+              action.status,
+            )
+              ? 'cancel_requested'
+              : 'cancelled';
+            action.reason = reason;
+            this.db
+              .prepare('UPDATE h_actions SET status=?,payload=? WHERE id=?')
+              .run(action.status, JSON.stringify(action), consumer);
+          }
+          this.db
+            .prepare(
+              "UPDATE h_jobs SET status='cancelled',fence=fence+1,lease_until=NULL WHERE object_id=? OR id=?",
+            )
+            .run(consumer, consumer);
+          this.db.prepare('DELETE FROM h_runs WHERE id=?').run(consumer);
+        }
+      }
+      return [...new Set(affected)];
+    });
+  }
+  saveReceipt(handle: ScopeHandle, receipt: ContextReceipt) {
+    const s = this.scope(handle);
+    if (s.retention === 'session_only') return;
+    const inherited = (receipt.providedObjectVersions || []).flatMap(ref => {
+      if (ref.kind !== 'work') return [];
+      const row = this.db.prepare(`SELECT json_extract(payload,'$.personalMethodSources') AS sources,
+        json_extract(payload,'$.data.type') AS type,json_extract(payload,'$.data.methodSources') AS own_method,
+        json_extract(payload,'$.sourceBinding') AS binding FROM h_work
+        WHERE id=? AND revision=? AND owner=? AND workspace=?`).get(ref.id, ref.revision, s.principalId, s.workspaceId);
+      if (!row) return [];
+      const raw: unknown = row.sources === null || row.sources === undefined ? [] : JSON.parse(String(row.sources));
+      const own = row.type === 'personal_method' && row.own_method !== null && row.own_method !== undefined
+        ? [{ ...personalMethodSourcesSchema.parse(JSON.parse(String(row.own_method))),
+          ...(row.binding ? { methodBinding: workSourceBindingSchema.parse(JSON.parse(String(row.binding))) } : {}) }] : [];
+      const sources: unknown = Array.isArray(raw) ? [...raw, ...own] : raw;
+      if (!Array.isArray(sources) || !sources.every(source => this.verifyPersonalMethodSources?.(handle, source) === true))
+        throw new HarnessError('personal_method_source_changed', "The personal-method basis borrowed by the new artifact changed. Old text was not continued.");
+      return sources.map(source => personalMethodSourcesSchema.parse(source));
+    });
+    if (inherited.length) receipt.personalMethodSources = [...new Map([...(receipt.personalMethodSources || []), ...inherited]
+      .map(source => [canonical(source), source])).values()];
+    this.write(() =>
+      this.db
+        .prepare(
+          'INSERT INTO h_runs VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,epoch=excluded.epoch',
+        )
+        .run(receipt.runId, s.principalId, s.workspaceId, this.epoch, JSON.stringify(receipt)),
+    );
+  }
+  fences(): PrivacyFence[] {
+    return this.db
+      .prepare('SELECT payload FROM h_fences ORDER BY epoch')
+      .all()
+      .map((r) => parse<PrivacyFence>(r)!);
+  }
+  confirmedAgendaReferences(): NonNullable<PrivacyFence['preservedLocalAgenda']> {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='agenda'").get()) return [];
+    return this.db.prepare('SELECT id,payload FROM agenda').all().flatMap(row => {
+      const item = JSON.parse(String(row.payload)), actionId = item.effectActionId || item.id;
+      const action = parse<any>(this.db.prepare("SELECT payload FROM h_actions WHERE id=? AND owner=? AND workspace=? AND subject=? AND world='real' AND status='succeeded'").get(actionId, this.identity.principalId, this.identity.workspaceId, this.identity.principalId));
+      if (!action || action.effect !== 'local_write' || !['local.agenda.save', 'local.agenda.change'].includes(action.capability) || action.goalId || item.goalId) return [];
+      const approved = this.db.prepare("SELECT 1 FROM h_approvals WHERE action_id=? AND json_extract(payload,'$.actionDigest')=? AND json_extract(payload,'$.actionRevision')=? AND json_extract(payload,'$.used')=1").get(actionId, action.digest, action.revision);
+      const confirmed = this.db.prepare("SELECT 1 FROM h_receipts WHERE action_id=? AND json_extract(payload,'$.status')='confirmed_success'").get(actionId);
+      return approved && confirmed ? [{ agendaId: String(row.id), agendaRevision: item.revision || 1, agendaSha256: createHash('sha256').update(String(row.payload)).digest('hex'), actionId, actionRevision: action.revision, actionDigest: action.digest }] : [];
+    });
+  }
+  private fenceFile() {
+    return this.databasePath === ':memory:' ? undefined : this.databasePath + '.privacy-fences.json';
+  }
+  private replacePolicyFile(file: string, payload: unknown) {
+    const temp = file + '.' + randomUUID() + '.tmp';
+    fs.writeFileSync(temp, JSON.stringify(payload), { mode: 0o600, flush: true });
+    // Windows indexers may briefly hold the destination. Keep the old complete
+    // barrier intact and retry the atomic rename, never delete it first.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        this.fault?.('before_privacy_rename');
+        fs.renameSync(temp, file);
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (attempt >= 9 || !['EPERM', 'EACCES', 'EBUSY'].includes(code || '')) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * (attempt + 1));
+      }
+    }
+  }
+  persistPolicyState() {
+    const file = this.fenceFile();
+    if (!file) return;
+    const payload = {
+      version: 1,
+      minimumEpoch: this.epoch,
+      policyRevision: this.policyRevision,
+      fences: this.fences(),
+      authorizations: {
+        grants: this.getMeta<string[]>('grants', []),
+        revoked: this.getMeta<string[]>('revoked', []),
+      },
+    };
+    this.replacePolicyFile(file, payload);
+  }
+  establishFence(input: Omit<PrivacyFence, 'id' | 'epoch' | 'createdAt'>): PrivacyFence {
+    const fence: PrivacyFence = {
+      ...input,
+      id: randomUUID(),
+      epoch: this.epoch + 1,
+      createdAt: this.clock.now(),
+    };
+    const file = this.fenceFile();
+    if (file) {
+      const fences = [...this.fences(), fence],
+        grants = this.getMeta<string[] | undefined>('grants'),
+        revoked = this.getMeta<string[]>('revoked', []);
+      const authorizations = grants
+        ? {
+            grants: input.kind === 'revoke' ? grants.filter((g) => g !== input.scope) : grants,
+            revoked:
+              input.kind === 'revoke' && input.scope ? [...new Set([...revoked, input.scope])] : revoked,
+          }
+        : undefined;
+      this.replacePolicyFile(file, {
+        version: 1,
+        minimumEpoch: fence.epoch,
+        policyRevision: this.policyRevision + 1,
+        fences,
+        authorizations,
+      });
+    }
+    this.write(() => {
+      this.db.prepare('INSERT INTO h_fences VALUES(?,?,?)').run(fence.id, fence.epoch, JSON.stringify(fence));
+      this.setMeta('privacy_epoch', fence.epoch);
+      this.setMeta('policy_revision', this.policyRevision + 1);
+      this.db
+        .prepare("UPDATE h_outbox SET status='cancelled' WHERE epoch<? AND status='pending'")
+        .run(fence.epoch);
+      this.db
+        .prepare(
+          "UPDATE h_jobs SET status=CASE WHEN status='leased' THEN 'unknown' ELSE 'paused_privacy' END,fence=fence+1,lease_until=NULL WHERE epoch<? AND status IN ('queued','leased')",
+        )
+        .run(fence.epoch);
+      this.db.prepare('DELETE FROM h_runs').run();
+    });
+    return fence;
+  }
+  revalidatePrivacyJobs() {
+    this.write(() => {
+      for (const row of this.db.prepare("SELECT * FROM h_jobs WHERE status='paused_privacy'").all()) {
+        const action = this.db.prepare('SELECT status FROM h_actions WHERE id=?').get(String(row.object_id));
+        const goal = row.goal_id
+          ? this.db.prepare('SELECT status FROM h_work WHERE id=?').get(String(row.goal_id))
+          : undefined;
+        const invalid =
+          this.hasFence(String(row.object_id), String(row.source)) ||
+          (action &&
+            ['cancelled', 'cancel_requested', 'cancellation_confirmed', 'cannot_cancel'].includes(
+              String(action.status),
+            )) ||
+          (row.goal_id && goal?.status !== 'active');
+        this.db
+          .prepare('UPDATE h_jobs SET status=?,epoch=? WHERE id=?')
+          .run(invalid ? 'cancelled' : 'queued', this.epoch, String(row.id));
+      }
+    });
+  }
+  private applyRestorationFences() {
+    const file = this.fenceFile();
+    if (!file || !fs.existsSync(file)) return;
+    const data = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+      version: number;
+      minimumEpoch?: number;
+      policyRevision?: number;
+      fences: PrivacyFence[];
+      authorizations?: { grants: string[]; revoked: string[] };
+    };
+    if (data.version !== 1 || !Array.isArray(data.fences))
+      throw new HarnessError('invalid_privacy_barrier', "The privacy recovery barrier is damaged. Material will not be opened.");
+    for (const fence of data.fences) {
+      this.write(() => {
+        this.db
+          .prepare('INSERT OR IGNORE INTO h_fences VALUES(?,?,?)')
+          .run(fence.id, fence.epoch, JSON.stringify(fence));
+        this.setMeta('privacy_epoch', Math.max(this.epoch, fence.epoch));
+      });
+      if (fence.kind === 'delete') this.cleanupFence(fence);
+      if (fence.kind === 'revoke' && fence.scope) {
+        const revoked = this.getMeta<string[]>('revoked', []);
+        this.setMeta('revoked', [...new Set([...revoked, fence.scope])]);
+      }
+    }
+    this.setMeta('privacy_epoch', Math.max(this.epoch, data.minimumEpoch || 1));
+    this.setMeta('policy_revision', Math.max(this.policyRevision, data.policyRevision || 1));
+    if (data.authorizations) {
+      this.setMeta('grants', data.authorizations.grants);
+      this.setMeta('revoked', data.authorizations.revoked);
+    }
+    this.setMeta('restoration_fence_applied', true);
+  }
+  /** Match notebook-derived copies by the erased source, never by timing.
+   * Old records without exact proof cannot establish independence; copies
+   * backed by a different note or a separate source remain independent. */
+  private noteMaterialsAffectedBy(fence: PrivacyFence): string[] {
+    const allNotes = fence.sourceIds.includes('notes:self');
+    const noteIds = [...new Set([...fence.objectIds, ...fence.sourceIds].filter(id => /^note-[a-f0-9-]{36}$/.test(id)))];
+    if (!allNotes && !noteIds.length) return [];
+    const noted = `EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.sourceIds') source WHERE source.value='notes:self')
+      OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.material') material WHERE json_extract(material.value,'$.tool')='manage_note'
+        OR json_type(material.value,'$.noteId')='text' OR json_extract(material.value,'$.sourceId')='notes:self')
+      OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.artifact.scenes') scene WHERE json_extract(scene.value,'$.kind')='note')`;
+    const workIds = this.db.prepare(`SELECT r.id FROM h_work r WHERE r.owner=? AND r.workspace=?
+      AND json_extract(r.payload,'$.data.type') IN ('help_opportunity','cooperation_record','curiosity_invitation') AND (
+        (?=1 AND ((${noted}) OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.noteSources'))
+          OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.artifact.scenes') scene
+            WHERE json_extract(scene.value,'$.kind')='map' AND json_type(scene.value,'$.storySetting') IS NOT NULL
+              AND (COALESCE(json_type(scene.value,'$.storySetting.noteSources'),'null')!='array'
+                OR json_array_length(scene.value,'$.storySetting.noteSources')>0))))
+        OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.noteSources') proof
+          WHERE CASE WHEN proof.type='object' THEN json_extract(proof.value,'$.id') END IN (SELECT value FROM json_each(?)))
+        OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.material') material
+          WHERE json_extract(material.value,'$.noteId') IN (SELECT value FROM json_each(?)))
+        OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.artifact.scenes') scene
+          WHERE json_extract(scene.value,'$.kind')='note' AND json_extract(scene.value,'$.proof.id') IN (SELECT value FROM json_each(?)))
+        OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.artifact.scenes') scene,json_each(scene.value,'$.storySetting.noteSources') proof
+          WHERE json_extract(scene.value,'$.kind')='map' AND CASE WHEN proof.type='object' THEN json_extract(proof.value,'$.id') END IN (SELECT value FROM json_each(?)))
+        OR (?=1 AND (((${noted}) AND (COALESCE(json_extract(r.payload,'$.data.materialNoteContractVersion'),0)!=1
+          OR COALESCE(json_type(r.payload,'$.data.noteSources'),'null')!='array'))
+          OR EXISTS(SELECT 1 FROM json_each(r.payload,'$.data.artifact.scenes') scene
+            WHERE json_extract(scene.value,'$.kind')='map' AND json_type(scene.value,'$.storySetting') IS NOT NULL
+              AND COALESCE(json_type(scene.value,'$.storySetting.noteSources'),'null')!='array'))))`)
+      .all(this.identity.principalId, this.identity.workspaceId, allNotes ? 1 : 0,
+        JSON.stringify(noteIds), JSON.stringify(noteIds), JSON.stringify(noteIds), JSON.stringify(noteIds), noteIds.length ? 1 : 0)
+      .map(row => String(row.id));
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'").get()) return workIds;
+    const messageNoted = `EXISTS(SELECT 1 FROM json_each(m.payload,'$.contextReceipt.providedSourceIds') source WHERE source.value='notes:self')
+      OR EXISTS(SELECT 1 FROM json_each(m.payload,'$.scenes') scene WHERE json_extract(scene.value,'$.kind')='note')
+      OR EXISTS(SELECT 1 FROM json_each(m.payload,'$.scenes') scene,json_each(scene.value,'$.provenance.noteSources') proof
+        WHERE json_extract(scene.value,'$.kind')='curiosity')`;
+    const messageIds = this.db.prepare(`SELECT m.id FROM messages m WHERE m.role='assistant' AND (
+        (?=1 AND ((${messageNoted}) OR EXISTS(SELECT 1 FROM json_each(m.payload,'$.contextReceipt.noteSources'))
+          OR EXISTS(SELECT 1 FROM json_each(m.payload,'$.scenes') scene
+            WHERE json_extract(scene.value,'$.kind')='map' AND json_type(scene.value,'$.storySetting') IS NOT NULL
+              AND (COALESCE(json_type(scene.value,'$.storySetting.noteSources'),'null')!='array'
+                OR json_array_length(scene.value,'$.storySetting.noteSources')>0))))
+        OR EXISTS(SELECT 1 FROM json_each(m.payload,'$.contextReceipt.noteSources') proof
+          WHERE CASE WHEN proof.type='object' THEN json_extract(proof.value,'$.id') END IN (SELECT value FROM json_each(?)))
+        OR EXISTS(SELECT 1 FROM json_each(m.payload,'$.scenes') scene WHERE json_extract(scene.value,'$.kind')='note'
+          AND json_extract(scene.value,'$.proof.id') IN (SELECT value FROM json_each(?)))
+        OR EXISTS(SELECT 1 FROM json_each(m.payload,'$.scenes') scene,json_each(scene.value,'$.provenance.noteSources') proof
+          WHERE json_extract(scene.value,'$.kind')='curiosity' AND CASE WHEN proof.type='object' THEN json_extract(proof.value,'$.id') END IN (SELECT value FROM json_each(?)))
+        OR EXISTS(SELECT 1 FROM json_each(m.payload,'$.scenes') scene,json_each(scene.value,'$.storySetting.noteSources') proof
+          WHERE json_extract(scene.value,'$.kind')='map' AND CASE WHEN proof.type='object' THEN json_extract(proof.value,'$.id') END IN (SELECT value FROM json_each(?)))
+        OR (?=1 AND (((${messageNoted}) AND COALESCE(json_type(m.payload,'$.contextReceipt.noteSources'),'null')!='array')
+          OR EXISTS(SELECT 1 FROM json_each(m.payload,'$.scenes') scene
+            WHERE json_extract(scene.value,'$.kind')='map' AND json_type(scene.value,'$.storySetting') IS NOT NULL
+              AND COALESCE(json_type(scene.value,'$.storySetting.noteSources'),'null')!='array'))))`)
+      .all(allNotes ? 1 : 0, JSON.stringify(noteIds), JSON.stringify(noteIds), JSON.stringify(noteIds), JSON.stringify(noteIds), noteIds.length ? 1 : 0)
+      .map(row => String(row.id));
+    return [...new Set([...workIds, ...messageIds])];
+  }
+  /** Older cleanup kept a host placeholder as assistant content. Recover only
+   * its already-erased source closure from durable privacy edges, never from
+   * wording or from the absence of a legacy receipt alone. */
+  private clearedMessageDependents(fence: PrivacyFence) {
+    const original = parse<PrivacyFence>(this.db.prepare("SELECT payload FROM h_fences WHERE id=? AND json_extract(payload,'$.kind')='delete'").get(fence.id));
+    if (!original
+      || !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'").get()) return [];
+    const queue = [...new Set([...original.objectIds, ...original.sourceIds])], seen = new Set<string>(), messages = new Set<string>();
+    while (queue.length) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (seen.size > 2000) throw new HarnessError('dependency_budget', "Source dependencies exceed this cleanup scope. Old text was not reopened.");
+      for (const row of this.db.prepare("SELECT consumer_id FROM h_dependencies WHERE producer_id=? AND sensitivity='privacy'").all(id)) {
+        const consumer = String(row.consumer_id);
+        queue.push(consumer);
+        if (this.db.prepare(`SELECT 1 FROM messages WHERE id=? AND role='assistant'
+          AND json_type(payload,'$.contextReceipt') IS NULL
+          AND NOT (COALESCE(json_extract(payload,'$.hostStatus.code'),'')='source_changed' AND length(content)=0)`)
+          .get(consumer)) messages.add(consumer);
+      }
+    }
+    return [...messages];
+  }
+  /** Each attached original follows its exact submission. This is deletion
+   * closure only: old manifests/bytes and body-read authority are not rebuilt.
+   * Remove only the obsolete coarse copy edge for these exact submissions. */
+  private fileChildrenAffectedBy(fence: PrivacyFence, alreadyClean: boolean): string[] {
+    if (!fence.objectIds.length && !fence.sourceIds.length) return [];
+    const children = this.db.prepare(`SELECT f.id,p.id AS parent,json_extract(f.payload,'$.locator.artifactId') AS artifact
+      FROM h_evidence f JOIN h_evidence p ON p.id=json_extract(f.payload,'$.parentEventId')
+        AND p.owner=f.owner AND p.workspace=f.workspace
+      WHERE f.owner=? AND f.workspace=? AND ((f.id=p.id||':file'
+        OR length(f.id)=length(p.id)+42 AND substr(f.id,1,length(p.id)+6)=p.id||':file:') AND f.source='file:'||f.id
+        AND json_extract(f.payload,'$.kind')='file_import' AND json_extract(f.payload,'$.speaker')='external'
+        AND json_extract(f.payload,'$.authority')='quotation' AND json_extract(f.payload,'$.locator.kind')='file'
+        OR length(f.id)=length(p.id)+43 AND substr(f.id,1,length(p.id)+7)=p.id||':image:'
+          AND json_extract(f.payload,'$.kind')='user_message' AND json_extract(f.payload,'$.speaker')='user'
+          AND json_type(f.payload,'$.imageSource')='object')
+        AND json_extract(p.payload,'$.kind')='user_message' AND json_extract(p.payload,'$.speaker')='user'
+        AND json_type(f.payload,'$.sessionId')='text' AND length(json_extract(f.payload,'$.sessionId'))>0
+        AND json_extract(f.payload,'$.sessionId')=json_extract(p.payload,'$.sessionId')
+        AND (p.id IN (SELECT value FROM json_each(?)) OR p.id IN (SELECT value FROM json_each(?))
+          OR (p.source IN (SELECT value FROM json_each(?)) AND (?=0 OR p.status='deleted')))`)
+      .all(this.identity.principalId, this.identity.workspaceId, JSON.stringify(fence.objectIds),
+        JSON.stringify(fence.sourceIds), JSON.stringify(fence.sourceIds), alreadyClean ? 1 : 0)
+      .filter(row => row.artifact === null || typeof row.artifact === 'string' && /^material-[a-f0-9-]{36}$/.test(row.artifact));
+    if (children.length) this.write(() => {
+      for (const child of children) this.db.prepare(`DELETE FROM h_dependencies WHERE consumer_id=? AND producer_id=?
+        AND producer_revision=0 AND sensitivity='privacy' AND invalidation='block'`).run(String(child.id), String(child.parent));
+    });
+    return children.map(row => String(row.id));
+  }
+  private personalMethodChoiceSurvivesCleanup(operationId: string, raw: unknown, fence: PrivacyFence): boolean {
+    if (!/^personal-method-choice:[a-f0-9]{64}$/u.test(operationId)) return false;
+    let value: unknown;
+    try { value = typeof raw === 'string' ? JSON.parse(raw) : raw; }
+    catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+    const parsed = personalMethodChoiceMetadataSchema.safeParse(value);
+    if (!parsed.success) return false;
+    const receipt = parsed.data, ref = receipt.source, methodId = receipt.methodId.slice('personal:'.length);
+    const { recordedAt: _recordedAt, ...identity } = receipt;
+    if (operationId !== 'personal-method-choice:' + createHash('sha256').update(canonical(identity)).digest('hex')) return false;
+    if (receipt.ownerId !== this.identity.principalId || receipt.workspaceId !== this.identity.workspaceId
+      || fence.sourceIds.includes('work:self') || [...fence.objectIds, ...fence.sourceIds].some(id => id === receipt.methodId || id === methodId)
+      || this.hasFence(receipt.methodId, 'work:self') || this.hasFence(methodId, 'work:self')) return false;
+    const method = this.db.prepare(`SELECT revision FROM h_work WHERE id=? AND owner=? AND workspace=?
+      AND subject=? AND world='real' AND audience='self' AND kind='recipe_candidate'
+      AND json_extract(payload,'$.data.type')='personal_method'`).get(methodId, receipt.ownerId, receipt.workspaceId, receipt.ownerId);
+    if (!method || Number(method.revision) < receipt.methodRevision) return false;
+    const sourceRow = this.db.prepare(`SELECT payload,source FROM h_evidence WHERE id=? AND owner=? AND workspace=?
+      AND subject=? AND world='real' AND version=? AND status IN ('active','redacted')`)
+      .get(ref.eventId, receipt.ownerId, receipt.workspaceId, receipt.ownerId, ref.contentVersion);
+    let rawSource: unknown;
+    try { rawSource = sourceRow ? JSON.parse(String(sourceRow.payload)) : undefined; }
+    catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+    const parsedSource = evidenceSchema.safeParse(rawSource);
+    if (!parsedSource.success) return false;
+    const source = parsedSource.data;
+    if (source.id !== ref.eventId || source.ownerId !== receipt.ownerId || source.workspaceId !== receipt.workspaceId
+      || source.subjectId !== receipt.ownerId || source.worldId !== 'real' || source.contentVersion !== ref.contentVersion
+      || source.sourceId !== sourceRow!.source || !['active', 'redacted'].includes(source.status)
+      || source.speaker !== 'user' || source.authority !== 'user_statement' || source.parentEventId
+      || ref.end > Array.from(source.text).length || this.hasFence(source.id, source.sourceId)
+      || this.blockedDeletedLineage(source, ref, false)) return false;
+    // A correction can stop inference without withdrawing the old accepted
+    // choice. Only privacy erasure/version/range changes revoke this metadata;
+    // no new scope is minted and no method prose is recovered here.
+    return createHash('sha256').update(codePointSlice(source.text, ref.start, ref.end)).digest('hex') === receipt.sourceQuoteSha256;
+  }
+  cleanupFence(fence: PrivacyFence) {
+    if (fence.kind !== 'delete') return;
+    const noteMaterials = this.noteMaterialsAffectedBy(fence);
+    const alreadyClean = this.getMeta('cleaned_fence:' + fence.id, false);
+    const fileChildren = this.fileChildrenAffectedBy(fence, alreadyClean);
+    // The marker commits with the cleanup. Restored older snapshots lack it and must
+    // replay the fence; an already-clean database must preserve later independent work.
+    if (alreadyClean) {
+      // Earlier versions could finish this fence without finding the notebook
+      // copies. Reuse the existing cleanup on those exact old objects only;
+      // do not replay the original broad deletion over later independent work.
+      if (noteMaterials.length) this.cleanupFence({ ...fence, id: fence.id + ':note-material-v1',
+        objectIds: noteMaterials, sourceIds: [], spans: [], deletedConversationIds: [] });
+      const clearedMessages = this.clearedMessageDependents(fence);
+      if (clearedMessages.length) this.cleanupFence({ ...fence, id: fence.id + ':message-state-v1',
+        objectIds: clearedMessages, sourceIds: [], spans: [], deletedConversationIds: [] });
+      if (fileChildren.length) this.cleanupFence({ ...fence, id: fence.id + ':file-parent-v1',
+        objectIds: fileChildren, sourceIds: [], spans: [], deletedConversationIds: [] });
+      this.pruneSemanticIndex();
+      this.clearMigrationBackups();
+      return;
+    }
+    this.write(() => {
+      const currentBusiness = fence.preservedLocalAgenda?.length ? this.confirmedAgendaReferences() : [];
+      const preservedBusiness = (fence.preservedLocalAgenda || []).filter(expected => !fence.sourceIds.includes('local-agenda') && !fence.objectIds.includes(expected.actionId) && !fence.objectIds.includes(expected.agendaId)
+        && currentBusiness.some(actual => actual.agendaId === expected.agendaId && actual.agendaRevision === expected.agendaRevision && actual.agendaSha256 === expected.agendaSha256 && actual.actionId === expected.actionId && actual.actionRevision === expected.actionRevision && actual.actionDigest === expected.actionDigest));
+      const preservedAgendaIds = new Set(preservedBusiness.map(item => item.agendaId));
+      const preserved = new Set(preservedBusiness.flatMap(item => [item.actionId, this.calendarVersionId(item.agendaId, item.agendaRevision)]));
+      const eventIds = new Set<string>(
+        fence.sourceIds.flatMap((source) =>
+          this.db
+            .prepare(
+              "SELECT id FROM h_evidence WHERE source=? OR id=? OR json_extract(payload,'$.locator.artifactId')=?",
+            )
+            .all(source, source, source)
+            .map((r) => String(r.id)),
+        ),
+      );
+      for (const id of fileChildren) eventIds.add(id);
+      const affected = new Set<string>(),
+        redactedPlanningActions = new Set<string>(),
+        redactedSources = new Set<string>(),
+        redactedRanges = new Map<string, { contentVersion: number; start: number; end: number }[]>();
+      for (const id of noteMaterials) {
+        affected.add(id);
+        for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+      }
+      for (const id of new Set([...fence.objectIds, ...fence.sourceIds])) {
+        if (!this.db.prepare("SELECT 1 FROM messages WHERE id=? AND role='assistant'").get(id)) continue;
+        affected.add(id);
+        for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+      }
+      const redactPlanningAttempts = (matches: (row: Row) => boolean) => {
+        for (const row of this.db.prepare('SELECT plan_id,intent_id,source_binding,redacted FROM h_planning_intent_attempts').all()) {
+          if (!matches(row)) continue;
+          for (const link of this.db.prepare('SELECT action_id FROM h_planning_intent_action_links WHERE plan_id=?').all(String(row.plan_id))) {
+            const actionId = String(link.action_id);
+            if (preserved.has(actionId)) continue;
+            redactedPlanningActions.add(actionId);
+            affected.add(actionId);
+            for (const dependent of this.invalidate(actionId, 'source_deleted', preserved)) affected.add(dependent);
+          }
+          // Preserve existence and source addresses, never the old private
+          // manifest. Missing proof must remain unknown on the next recovery.
+          this.db.prepare("UPDATE h_planning_intent_attempts SET manifest='{}',redacted=1 WHERE plan_id=?").run(String(row.plan_id));
+        }
+      };
+      // Collect linked pending actions before an explicit owner deletion can
+      // cascade away their only planning relation.
+      redactPlanningAttempts(row => fence.objectIds.includes(String(row.intent_id)) || fence.objectIds.includes(String(row.plan_id)));
+      const recordRedaction = (eventId: string, contentVersion: number, start: number, end: number) => {
+        redactedSources.add(eventId);
+        redactedRanges.set(eventId, [...(redactedRanges.get(eventId) || []), { contentVersion, start, end }]);
+      };
+      for (const span of fence.spans || []) {
+        const event = parse<EvidenceEvent>(
+          this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(span.eventId),
+        );
+        const legacy = this.db.prepare('SELECT content FROM messages WHERE id=?').get(span.eventId);
+        const original = event?.text ?? (legacy ? String(legacy.content) : undefined);
+        if (original === undefined) continue;
+        const chars = Array.from(original);
+        const start = event && event.contentVersion !== span.contentVersion ? 0 : span.start,
+          end = event && event.contentVersion !== span.contentVersion ? chars.length : span.end;
+        for (let i = start; i < Math.min(end, chars.length); i++) chars[i] = '█';
+        const text = chars.join('');
+        if (event) {
+          event.text = text;
+          event.status = 'redacted';
+          this.db
+            .prepare('UPDATE h_evidence SET content=?,status=?,payload=? WHERE id=?')
+            .run(text, event.status, JSON.stringify(event), event.id);
+          this.replaceIndex('evidence', event.id, text);
+          recordRedaction(event.id, event.contentVersion, start, end);
+        }
+        this.redactLegacyMessage(span.eventId, text);
+      }
+      for (const id of fence.objectIds) {
+        if (this.db.prepare('SELECT id FROM h_evidence WHERE id=?').get(id)) eventIds.add(id);
+        const refs = this.db
+          .prepare('SELECT event_id,content_version,start_cp,end_cp FROM h_assertion_citations WHERE assertion_id=?')
+          .all(id);
+        for (const ref of refs) {
+          const eid = String(ref.event_id),
+            event = parse<EvidenceEvent>(
+              this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(eid),
+            );
+          if (!event) continue;
+          if (ref.content_version === null || ref.start_cp === null || ref.end_cp === null) {
+            eventIds.add(eid);
+            continue;
+          }
+          const chars = Array.from(event.text);
+          const start = Number(ref.content_version) === event.contentVersion ? Number(ref.start_cp) : 0,
+            end = Number(ref.content_version) === event.contentVersion ? Number(ref.end_cp) : chars.length;
+          for (let i = Math.max(0, start); i < Math.min(end, chars.length); i++) chars[i] = '█';
+          event.text = chars.join('');
+          event.status = 'redacted';
+          this.db
+            .prepare('UPDATE h_evidence SET content=?,status=?,payload=? WHERE id=?')
+            .run(event.text, event.status, JSON.stringify(event), eid);
+          this.replaceIndex('evidence', eid, event.text);
+          this.redactLegacyMessage(eid, event.text);
+          recordRedaction(eid, event.contentVersion, start, end);
+        }
+        this.removeAssertion(id);
+        for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+        this.db.prepare('DELETE FROM h_work WHERE id=?').run(id);
+        this.db.prepare('DELETE FROM h_sync_operations WHERE object_id=?').run(id);
+      }
+      const directlyDeletedEvents = new Set(eventIds);
+      const roots = [...eventIds, ...redactedSources, ...fence.sourceIds],
+        visited = new Set<string>();
+      while (roots.length) {
+        const root = roots.shift()!;
+        if (visited.has(root)) continue;
+        visited.add(root);
+        for (const row of this.db
+          .prepare('SELECT event_id FROM h_evidence_roots WHERE root_id=?')
+          .all(root)) {
+          const id = String(row.event_id);
+          if (id === root || redactedSources.has(id)) continue;
+          const event = parse<EvidenceEvent>(this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(id));
+          const ranges = redactedRanges.get(root);
+          if (!eventIds.has(root) && ranges?.length && event) {
+            const origins = this.sourceOrigins(event, { start: 0, end: Array.from(event.text).length }).spans.filter(origin => origin.eventId === root);
+            // A proven disjoint origin remains legal through multiple exact
+            // projections. An unknown summary cannot make that promise.
+            if (origins.length && origins.every(origin => origin.start !== undefined && origin.end !== undefined
+              && ranges.every(range => range.contentVersion === origin.contentVersion && (range.end <= origin.start! || range.start >= origin.end!)))) continue;
+          }
+          if (!eventIds.has(id)) {
+            eventIds.add(id);
+            roots.push(id);
+          }
+        }
+      }
+      // Exact versioned citations, including authorization quotes, are the
+      // dependency relation. A source-ID join cannot represent disjoint uses.
+      const citationQueue = [...new Set([...redactedRanges.keys(), ...eventIds])], checkedSources = new Set<string>();
+      while (citationQueue.length) {
+        const eventId = citationQueue.shift()!;
+        if (checkedSources.has(eventId)) continue;
+        checkedSources.add(eventId);
+        const ranges = redactedRanges.get(eventId) || [], whole = eventIds.has(eventId);
+        for (const row of this.db.prepare(`SELECT c.*,a.revision AS current_revision FROM h_assertion_citations c
+          JOIN h_assertions a ON a.id=c.assertion_id WHERE c.event_id=?`).all(eventId)) {
+          if (!whole && row.content_version !== null && row.start_cp !== null && row.end_cp !== null
+            && !ranges.some(range => range.contentVersion !== Number(row.content_version)
+              || range.start < Number(row.end_cp) && range.end > Number(row.start_cp))) continue;
+          const id = String(row.assertion_id), revision = Number(row.assertion_revision);
+          if (revision === Number(row.current_revision)) {
+            if (row.role === 'authorization') {
+              for (const citation of this.citationRows(id, revision).filter(value => value.role === 'primary')) {
+                const projected = parse<EvidenceEvent>(this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(citation.eventId));
+                if (projected?.parentEventId !== eventId || projected.locator?.kind !== 'text') continue;
+                const derived = [projected.id];
+                while (derived.length) {
+                  const sourceId = derived.shift()!;
+                  if (eventIds.has(sourceId)) continue;
+                  eventIds.add(sourceId); citationQueue.push(sourceId);
+                  for (const child of this.db.prepare('SELECT event_id FROM h_evidence_roots WHERE root_id=? AND event_id!=?').all(sourceId, sourceId)) derived.push(String(child.event_id));
+                }
+              }
+            }
+            this.removeAssertion(id);
+          } else this.db.prepare('DELETE FROM h_assertion_versions WHERE id=? AND revision=?').run(id, revision);
+          for (const dependent of this.invalidate(id, 'source_redacted', preserved)) affected.add(dependent);
+        }
+      }
+      for (const id of redactedSources)
+        for (const dependent of this.invalidate(id, 'source_redacted', preserved)) affected.add(dependent);
+      for (const id of eventIds) {
+        for (const observation of this.db
+          .prepare('SELECT id FROM h_observations WHERE evidence_id=?')
+          .all(id))
+          this.db.prepare('DELETE FROM h_observations WHERE id=?').run(String(observation.id));
+        this.db.prepare('DELETE FROM h_domain WHERE evidence_id=?').run(id);
+        const dependents = this.db
+          .prepare('SELECT assertion_id FROM h_assertion_evidence WHERE event_id=?')
+          .all(id);
+        for (const dep of dependents) {
+          const aid = String(dep.assertion_id);
+          const assertion = parse<Assertion>(
+            this.db.prepare('SELECT payload FROM h_assertions WHERE id=?').get(aid),
+          );
+          if (!assertion) continue;
+          const remaining = assertion.evidenceIds.filter((e) => e !== id && !eventIds.has(e));
+          if (!remaining.length) this.removeAssertion(aid);
+          else {
+            assertion.evidenceIds = remaining;
+            assertion.status = 'candidate';
+            assertion.verification = 'pending';
+            assertion.text = "The source changed; awaiting revalidation from retained evidence";
+            assertion.value = { type: 'unknown', reason: 'source_deleted' };
+            assertion.revision++;
+            this.db
+              .prepare('UPDATE h_assertions SET status=?,text=?,payload=?,revision=? WHERE id=?')
+              .run(assertion.status, assertion.text, JSON.stringify(assertion), assertion.revision, aid);
+            this.db.prepare('DELETE FROM h_assertion_versions WHERE id=?').run(aid);
+            this.db
+              .prepare('DELETE FROM h_assertion_evidence WHERE assertion_id=? AND event_id=?')
+              .run(aid, id);
+            this.replaceIndex('assertion', aid, assertion.text);
+          }
+          for (const dependent of this.invalidate(aid, 'source_deleted', preserved)) affected.add(dependent);
+        }
+        const event = parse<EvidenceEvent>(
+          this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(id),
+        );
+        if (event) {
+          if (event.parentEventId && directlyDeletedEvents.has(id)) {
+            const parent = parse<EvidenceEvent>(
+              this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(event.parentEventId),
+            );
+            if (parent) {
+              if (event.locator?.kind === 'text') {
+                const chars = Array.from(parent.text);
+                for (
+                  let i = event.locator.startCodePoint;
+                  i < Math.min(event.locator.endCodePoint, chars.length);
+                  i++
+                )
+                  chars[i] = '█';
+                parent.text = chars.join('');
+                parent.status = 'redacted';
+                this.db
+                  .prepare('UPDATE h_evidence SET content=?,status=?,payload=? WHERE id=?')
+                  .run(parent.text, parent.status, JSON.stringify(parent), parent.id);
+                this.replaceIndex('evidence', parent.id, parent.text);
+              }
+              if (!this.removeMessageAttachment(parent.id, event.id, parent.text)) this.redactLegacyMessage(
+                parent.id,
+                parent.text + (event.kind === 'file_import' ? "\n[Attachment content deleted]" : ''),
+              );
+            }
+          }
+          event.text = '';
+          event.status = 'deleted';
+          this.db
+            .prepare("UPDATE h_evidence SET content='',status='deleted',payload=? WHERE id=?")
+            .run(JSON.stringify(event), id);
+        }
+        this.db.prepare('DELETE FROM h_evidence_fts WHERE id=?').run(id);
+        this.db.prepare("DELETE FROM h_grams WHERE kind='evidence' AND object_id=?").run(id);
+        this.db.prepare('DELETE FROM h_spans WHERE event_id=?').run(id);
+        this.redactLegacyMessage(id, "[This passage was deleted]");
+        for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+      }
+      // A semantic revision can depend on its change quote even when the old
+      // assertion keeps independent supporting citations (for example a new
+      // validTo on SUPERSEDE). Forget that derived version with the quote.
+      for (const row of this.db.prepare(`SELECT l.*,a.revision AS current_revision FROM h_assertion_revision_log l
+        JOIN h_assertions a ON a.id=l.assertion_id WHERE l.cause_event_id IS NOT NULL`).all()) {
+        const eventId = String(row.cause_event_id), ranges = redactedRanges.get(eventId) || [];
+        if (!eventIds.has(eventId) && !ranges.some(range => range.contentVersion !== Number(row.cause_version)
+          || range.start < Number(row.cause_end) && range.end > Number(row.cause_start))) continue;
+        const id = String(row.assertion_id), revision = Number(row.revision);
+        if (revision === Number(row.current_revision)) this.removeAssertion(id);
+        else this.db.prepare('DELETE FROM h_assertion_versions WHERE id=? AND revision=?').run(id, revision);
+        for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+      }
+      this.db.prepare(`DELETE FROM h_assertion_revision_log WHERE NOT EXISTS(
+        SELECT 1 FROM h_assertion_versions v WHERE v.id=h_assertion_revision_log.assertion_id AND v.revision=h_assertion_revision_log.revision)`).run();
+      this.db.prepare(`UPDATE h_assertion_revision_log SET related_assertion_id=NULL WHERE related_assertion_id IS NOT NULL
+        AND NOT EXISTS(SELECT 1 FROM h_assertions a WHERE a.id=h_assertion_revision_log.related_assertion_id)`).run();
+      const removedSpatialVersions = new Set<string>();
+      const spatialVersionAffected = (version: SpatialBindingVersionMetadata) => version.spatialBinding
+        ? eventIds.has(version.spatialBinding.basis.eventId) || (redactedRanges.get(version.spatialBinding.basis.eventId) || []).some(range =>
+          range.contentVersion !== version.spatialBinding!.basis.contentVersion
+          || range.start < version.spatialBinding!.basis.end && range.end > version.spatialBinding!.basis.start)
+        : version.evidenceIds.some(id => eventIds.has(id) || redactedSources.has(id));
+      // A role can change normally without erasing the sources of an older
+      // route. Forget only the exact frozen business versions hit by this cut.
+      for (const row of this.db.prepare(`SELECT id,revision,json_extract(payload,'$.data.type') AS type,
+        json_extract(payload,'$.data.placeId') AS place_id,json_extract(payload,'$.data.spatialBinding') AS binding,
+        json_type(payload,'$.data.spatialBinding') AS binding_type,json_extract(payload,'$.evidenceIds') AS evidence_ids,
+        json_extract(payload,'$.data.spatialBindingVersions') AS versions,json_extract(payload,'$.data.requiresRebuild') AS rebuild
+        FROM h_work WHERE owner=? AND workspace=? AND json_extract(payload,'$.data.type') IN ('spatial_role','spatial_alias','spatial_crosswalk')`)
+        .all(this.identity.principalId, this.identity.workspaceId)) {
+        const id = String(row.id), whole = fence.objectIds.includes(id) || fence.sourceIds.includes(id) || fence.sourceIds.includes('work:self');
+        const evidenceIds: unknown = JSON.parse(String(row.evidence_ids || '[]'));
+        const current = row.rebuild === 1 ? undefined : this.spatialVersionMetadata({ revision: row.revision, type: row.type,
+          ...(row.place_id === null ? {} : { placeId: row.place_id }), evidenceIds,
+          ...(row.binding_type === null ? { range: 'unknown' } : { spatialBinding: row.binding_type === 'object' ? JSON.parse(String(row.binding)) : null }) });
+        if (current && (whole || spatialVersionAffected(current))) removedSpatialVersions.add(`${id}:${current.revision}`);
+        const raw: unknown = row.versions === null ? [] : JSON.parse(String(row.versions));
+        if (!Array.isArray(raw)) continue;
+        const retained = raw.filter(value => {
+          const version = this.spatialVersionMetadata(value);
+          if (!version || !whole && !spatialVersionAffected(version)) return true;
+          removedSpatialVersions.add(`${id}:${version.revision}`);
+          return false;
+        });
+        if (retained.length !== raw.length) this.db.prepare(`UPDATE h_work SET payload=json_set(payload,'$.data.spatialBindingVersions',json(?)) WHERE id=?`)
+          .run(JSON.stringify(retained), id);
+      }
+      for (const id of [...eventIds, ...redactedSources]) {
+        this.db.prepare("DELETE FROM h_domain_versions WHERE json_extract(payload,'$.evidenceId')=?").run(id);
+        for (const row of this.db
+          .prepare(
+            "SELECT id,payload FROM h_work WHERE EXISTS(SELECT 1 FROM json_each(h_work.payload,'$.evidenceIds') e WHERE e.value=?)",
+          )
+          .all(id)) {
+          const work = parse<WorkRecord>(row), binding = workSourceBindingSchema.safeParse(work?.sourceBinding),
+            spatial = spatialBindingSchema.safeParse(work?.data.spatialBinding);
+          const refs = binding.success ? binding.data.refs : spatial.success ? [spatial.data.basis] : work && declaredFrameSourceRefs(work,
+            eventId => parse<EvidenceEvent>(this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(eventId)));
+          if (!eventIds.has(id) && refs && !refs.some(ref => ref.eventId === id
+            && (redactedRanges.get(id) || []).some(range => range.contentVersion !== ref.contentVersion || range.start < ref.end && range.end > ref.start))) continue;
+          affected.add(String(row.id));
+          // The exact-version proof scans below replace an ID-wide edge for
+          // these owners; another version may use an independent request.
+          if (work && ['spatial_role', 'spatial_alias', 'spatial_crosswalk'].includes(String(work.data.type))) continue;
+          for (const dependent of this.invalidate(String(row.id), 'source_deleted', preserved)) affected.add(dependent);
+        }
+      }
+      const planningBindingAffected = (raw: unknown) => {
+        const binding = workSourceBindingSchema.safeParse(raw);
+        if (!binding.success) return true;
+        return binding.data.sourceIds.some(source => fence.sourceIds.includes(source)) || binding.data.refs.some(ref =>
+          eventIds.has(ref.eventId) || (redactedRanges.get(ref.eventId) || []).some(range =>
+            range.contentVersion !== ref.contentVersion || range.start < ref.end && range.end > ref.start));
+      };
+      const personalMethodSupportAffected = (raw: unknown) => {
+        const parsed = personalMethodSourcesSchema.safeParse(raw);
+        return !parsed.success || parsed.data.methodBinding && planningBindingAffected(parsed.data.methodBinding)
+          || parsed.data.workAssistance.some(source => fence.objectIds.includes(source.id) || fence.objectIds.includes(source.matterId)
+            || planningBindingAffected(source.sourceBinding)
+            || source.owner === 'study_companion' && source.material && [source.material.resourceId, source.material.sourceEventId,
+              source.material.parentEventId].some(id => fence.objectIds.includes(id) || eventIds.has(id))
+            || source.owner === 'study_companion' && source.noteSources?.some(note => fence.objectIds.includes(note.id)
+              || fence.sourceIds.includes('notes:self'))
+            || source.owner === 'companion_session' && (fence.objectIds.includes(source.messageId) || affected.has(source.messageId)
+              || source.learningProcessRefs.some(linked => fence.objectIds.includes(linked.id) || planningBindingAffected(linked.sourceBinding))
+              || fence.objectIds.includes(source.sceneId) || source.materials.some(material => [material.resourceId, material.sourceEventId,
+                material.parentEventId].some(id => fence.objectIds.includes(id) || eventIds.has(id)))
+              || source.assistantMaterials.some(material => fence.objectIds.includes(material.messageId) || affected.has(material.messageId)
+                || material.sourceRefs.some(ref => eventIds.has(ref.eventId) || (redactedRanges.get(ref.eventId) || []).some(range =>
+                  range.contentVersion !== ref.contentVersion || range.start < ref.end && range.end > ref.start)))))
+          || parsed.data.anchors.some(anchor => fence.objectIds.includes(anchor.id) || affected.has(anchor.id)
+          || planningBindingAffected(anchor.sourceBinding)) || parsed.data.assistance.some(source =>
+          fence.objectIds.includes(source.messageId) || affected.has(source.messageId) || source.sourceRefs.some(ref =>
+            eventIds.has(ref.eventId) || (redactedRanges.get(ref.eventId) || []).some(range =>
+              range.contentVersion !== ref.contentVersion || range.start < ref.end && range.end > ref.start)));
+      };
+      for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.data.methodSources') AS method_sources FROM h_work
+        WHERE json_extract(payload,'$.data.type')='personal_method' AND json_type(payload,'$.data.methodSources') IS NOT NULL`).all()) {
+        let remove = false;
+        try { remove = personalMethodSupportAffected(JSON.parse(String(row.method_sources))); }
+        catch (error) { if (error instanceof SyntaxError) remove = true; else throw error; }
+        if (remove) {
+          const id = String(row.id); affected.add(id);
+          for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+        }
+      }
+      for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.personalMethodSources') AS sources FROM h_work
+        WHERE json_type(payload,'$.personalMethodSources') IS NOT NULL`).all()) {
+        let remove = false;
+        try {
+          const sources: unknown = JSON.parse(String(row.sources));
+          remove = !Array.isArray(sources) || sources.some(personalMethodSupportAffected);
+        } catch (error) { if (error instanceof SyntaxError) remove = true; else throw error; }
+        if (remove) {
+          const id = String(row.id); affected.add(id);
+          for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+        }
+      }
+      // A frontier contains addresses rather than source bodies, but forgotten
+      // IDs and ranges must not survive as another recovery directory.
+      for (const row of this.db.prepare('SELECT id,opportunity_id,payload FROM h_investigation_frontiers').all()) {
+        let remove = fence.objectIds.includes(String(row.id)) || affected.has(String(row.opportunity_id));
+        try {
+          const value = JSON.parse(String(row.payload)) as { sourceIds?: string[]; refs?: { eventId: string; contentVersion: number; sourceId: string; start: number; end: number }[] };
+          remove ||= !Array.isArray(value.refs) || value.sourceIds?.some(source => fence.sourceIds.includes(source)) === true
+            || value.refs.some(ref => fence.objectIds.includes(ref.eventId) || fence.sourceIds.includes(ref.sourceId)
+              || eventIds.has(ref.eventId) || (redactedRanges.get(ref.eventId) || []).some(range =>
+                range.contentVersion !== ref.contentVersion || range.start < ref.end && range.end > ref.start));
+        } catch (error) { if (error instanceof SyntaxError) remove = true; else throw error; }
+        if (remove) this.db.prepare('DELETE FROM h_investigation_frontiers WHERE id=?').run(String(row.id));
+      }
+      redactPlanningAttempts(row => {
+        if (affected.has(String(row.intent_id))) return true;
+        try { return planningBindingAffected(typeof row.source_binding === 'string' ? JSON.parse(row.source_binding) : undefined); }
+        catch (error) { if (error instanceof SyntaxError) return true; throw error; }
+      });
+      const planningProvenanceAffected = (value: unknown) => {
+        const parsed = planningMaterialProvenanceSchema.safeParse(value);
+        return !parsed.success || fence.objectIds.includes(parsed.data.intentId) || affected.has(parsed.data.intentId)
+          || planningBindingAffected(parsed.data.sourceBinding) || parsed.data.attemptBasis.some(attempt =>
+            fence.objectIds.includes(attempt.planId) || planningBindingAffected(attempt.sourceBinding));
+      };
+      for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.data.planningProvenance') AS provenance FROM h_work
+        WHERE json_type(payload,'$.data.planningProvenance') IS NOT NULL`).all()) {
+        let remove = false;
+        try {
+          const values: unknown = JSON.parse(String(row.provenance));
+          remove = !Array.isArray(values) || values.some(planningProvenanceAffected);
+        } catch (error) { if (error instanceof SyntaxError) remove = true; else throw error; }
+        if (remove) {
+          const id = String(row.id); affected.add(id);
+          for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+        }
+      }
+      const workoutSourcesAffected = (raw: unknown): boolean => {
+        if (raw === undefined) return false;
+        const parsed = workoutSourceProofSchema.array().max(256).safeParse(raw);
+        return !parsed.success || parsed.data.some(proof => fence.sourceIds.includes('workout:self')
+          || fence.objectIds.includes(workoutSourceObjectId(proof.workoutId)));
+      };
+      for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.data.workoutSources') AS sources
+        FROM h_work WHERE json_type(payload,'$.data.workoutSources') IS NOT NULL`).all()) {
+        let remove: boolean;
+        try { remove = workoutSourcesAffected(JSON.parse(String(row.sources))); }
+        catch (error) { if (error instanceof SyntaxError) remove = true; else throw error; }
+        if (remove) {
+          const id = String(row.id); affected.add(id);
+          for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+        }
+      }
+      const spatialSourcesAffected = (raw: unknown): boolean => {
+        if (raw === undefined) return false;
+        const parsed = spatialSourceProofSchema.array().max(256).safeParse(raw);
+        if (!parsed.success) return true;
+        return parsed.data.some(proof => {
+          const id = proof.origin.id;
+          if (fence.objectIds.includes(id) || fence.sourceIds.includes(id)) return true;
+          if (proof.origin.kind !== 'binding') return false;
+          const revision = proof.origin.revision;
+          if (removedSpatialVersions.has(`${id}:${revision}`)) return true;
+          const row = this.db.prepare(`SELECT revision,json_extract(payload,'$.data.type') AS type,
+            json_extract(payload,'$.data.placeId') AS place_id,json_extract(payload,'$.data.spatialBinding') AS binding,
+            json_type(payload,'$.data.spatialBinding') AS binding_type,json_extract(payload,'$.data.spatialBindingVersions') AS versions,
+            json_extract(payload,'$.evidenceIds') AS evidence_ids FROM h_work WHERE id=? AND owner=? AND workspace=?`)
+            .get(id, this.identity.principalId, this.identity.workspaceId);
+          if (!row) return false;
+          let version: SpatialBindingVersionMetadata | undefined;
+          try {
+            if (row.revision === revision) version = this.spatialVersionMetadata({ revision: row.revision, type: row.type,
+              ...(row.place_id === null ? {} : { placeId: row.place_id }), evidenceIds: JSON.parse(String(row.evidence_ids || '[]')),
+              ...(row.binding_type === null ? { range: 'unknown' } : { spatialBinding: row.binding_type === 'object' ? JSON.parse(String(row.binding)) : null }) });
+            else {
+              const versions: unknown = row.versions === null ? [] : JSON.parse(String(row.versions));
+              if (Array.isArray(versions)) {
+                const matches = versions.map(value => this.spatialVersionMetadata(value)).filter(value => value?.revision === revision);
+                if (matches.length === 1) version = matches[0];
+              }
+            }
+          } catch (error) { if (error instanceof SyntaxError) return true; throw error; }
+          // Missing old metadata is unreadable, but normal revision mismatch
+          // alone is not evidence that this particular forget erased it.
+          return !!version && spatialVersionAffected(version);
+        });
+      };
+      for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.data.spatialSources') AS sources
+        FROM h_work WHERE json_type(payload,'$.data.spatialSources') IS NOT NULL`).all()) {
+        let remove: boolean;
+        try { remove = spatialSourcesAffected(JSON.parse(String(row.sources))); }
+        catch (error) { if (error instanceof SyntaxError) remove = true; else throw error; }
+        if (remove) {
+          const id = String(row.id); affected.add(id);
+          for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+        }
+      }
+      // A saved view is another source-derived copy, even when it was attached
+      // in a different conversation without an ordinary dependency edge.
+      for (const row of this.db.prepare(`SELECT id,payload FROM messages WHERE role='assistant'
+        AND (json_type(payload,'$.contextReceipt.planningProvenance') IS NOT NULL
+          OR json_type(payload,'$.contextReceipt.historicalAssertionVersions') IS NOT NULL
+          OR json_type(payload,'$.contextReceipt.learningProcessVersions') IS NOT NULL
+          OR json_type(payload,'$.contextReceipt.reflectiveLetterSources') IS NOT NULL
+          OR json_type(payload,'$.contextReceipt.workSourceBindings') IS NOT NULL
+          OR json_type(payload,'$.contextReceipt.assistantWorkSources') IS NOT NULL
+          OR json_type(payload,'$.contextReceipt.personalMethodSources') IS NOT NULL
+          OR json_type(payload,'$.contextReceipt.spatialSources') IS NOT NULL
+          OR json_type(payload,'$.contextReceipt.workoutSources') IS NOT NULL
+          OR EXISTS(SELECT 1 FROM json_each(messages.payload,'$.scenes') s WHERE json_type(s.value,'$.continuation')='object'
+            OR json_extract(s.value,'$.kind') IN ('curiosity','discussion')))`).all()) {
+        const message = JSON.parse(String(row.payload));
+        const receiptProvenance = message.contextReceipt?.planningProvenance;
+        const provenance = [...(Array.isArray(receiptProvenance) ? receiptProvenance : receiptProvenance === undefined ? [] : [null]),
+          ...(Array.isArray(message.scenes) ? message.scenes : []).flatMap((scene: { kind?: string; continuation?: Record<string, unknown> }) => {
+            const value = scene.continuation;
+            return scene.kind === 'planning' && value ? [{ intentId: value.intentId, intentRevision: value.intentRevision,
+              sourceBinding: value.sourceBinding, attemptBasis: value.attemptBasis }] : [];
+          })];
+        const historical = message.contextReceipt?.historicalAssertionVersions;
+        const historicalAffected = historical !== undefined && (!Array.isArray(historical) || historical.some((ref: any) =>
+          !ref || typeof ref.id !== 'string' || !Number.isSafeInteger(ref.revision) || ref.revision < 1
+          || fence.objectIds.includes(ref.id) || !this.db.prepare('SELECT 1 FROM h_assertion_versions WHERE id=? AND revision=?').get(ref.id, ref.revision)));
+        const learning = message.contextReceipt?.learningProcessVersions;
+        const learningAffected = learning !== undefined && (!Array.isArray(learning) || learning.some((ref: any) =>
+          !ref || typeof ref.id !== 'string' || !Number.isSafeInteger(ref.revision) || ref.revision < 1
+          || fence.objectIds.includes(ref.id) || affected.has(ref.id) || !this.db.prepare('SELECT 1 FROM h_work WHERE id=?').get(ref.id)));
+        const workBindings = message.contextReceipt?.workSourceBindings;
+        const workAffected = workBindings !== undefined && (!Array.isArray(workBindings) || workBindings.some(planningBindingAffected));
+        const assistantWorkAffected = (raw: unknown): boolean => raw !== undefined && (!Array.isArray(raw) || raw.some(value => {
+          const parsed = assistantWorkSourceSchema.safeParse(value);
+          return !parsed.success || [parsed.data.messageId, parsed.data.sceneId].some(id =>
+            fence.objectIds.includes(id) || eventIds.has(id) || affected.has(id));
+        }));
+        const assistantWorksAffected = assistantWorkAffected(message.contextReceipt?.assistantWorkSources);
+        const personalMethods = message.contextReceipt?.personalMethodSources;
+        const personalMethodsAffected = personalMethods !== undefined && (!Array.isArray(personalMethods) || personalMethods.some(personalMethodSupportAffected));
+        const creationAffected = (Array.isArray(message.scenes) ? message.scenes : []).some((scene: any) => scene?.kind === 'curiosity'
+          && ([scene.id, scene.view?.id, scene.view?.matterId].some(id => typeof id !== 'string' || fence.objectIds.includes(id))
+            || planningBindingAffected(scene.provenance?.sourceBinding) || assistantWorkAffected(scene.provenance?.assistantWorkSources)));
+        const coWorkAffected = (Array.isArray(message.scenes) ? message.scenes : []).some((scene: any) => scene?.kind === 'discussion'
+          && (planningBindingAffected(scene.provenance?.sourceBinding) || (Array.isArray(scene.coWork) ? scene.coWork : []).some((projection: any) => {
+            if ([projection.id, projection.matterId].some(id => typeof id !== 'string' || fence.objectIds.includes(id))) return true;
+            const proof = projection.snapshotProof;
+            return proof && (planningBindingAffected(proof.sourceBinding)
+              || !Array.isArray(proof.assistantMaterials) || proof.assistantMaterials.some((source: any) => fence.objectIds.includes(source.messageId)
+                || affected.has(source.messageId) || !Array.isArray(source.sourceRefs) || source.sourceRefs.some((ref: any) =>
+                  planningBindingAffected({ ...proof.sourceBinding, refs: [ref] })))
+              || !Array.isArray(proof.materials) || proof.materials.some((file: any) => fence.objectIds.includes(file.resourceId)
+                || eventIds.has(file.source?.eventId))
+              || !Array.isArray(proof.learningProcessRefs) || proof.learningProcessRefs.some((linked: any) => fence.objectIds.includes(linked.id)
+                || planningBindingAffected(linked.sourceBinding))
+              || !Array.isArray(proof.personalMethodSources) || proof.personalMethodSources.some(personalMethodSupportAffected));
+          })));
+        const letterSources = message.contextReceipt?.reflectiveLetterSources;
+        const lettersAffected = letterSources !== undefined && (!Array.isArray(letterSources) || letterSources.some((value: unknown) => {
+          const parsed = reflectiveLetterMetadataSchema.safeParse(value);
+          return !parsed.success || planningBindingAffected(parsed.data.binding) || parsed.data.proofs.some(proof =>
+            proof.kind === 'learning' && (fence.objectIds.includes(proof.id) || affected.has(proof.id)
+              || planningBindingAffected(proof.sourceBinding))
+            || proof.kind === 'material' && [proof.resourceId, proof.sourceEventId, proof.parentEventId].some(id => fence.objectIds.includes(id)));
+        }));
+        if (historicalAffected || learningAffected || workAffected || assistantWorksAffected || personalMethodsAffected || creationAffected || coWorkAffected || lettersAffected
+          || spatialSourcesAffected(message.contextReceipt?.spatialSources) || workoutSourcesAffected(message.contextReceipt?.workoutSources)
+          || provenance.some(planningProvenanceAffected)) {
+          const id = String(row.id); affected.add(id);
+          for (const dependent of this.invalidate(id, 'source_deleted', preserved)) affected.add(dependent);
+        }
+      }
+      // Reference context is not a personal-evidence citation. Remove only
+      // revisions that actually depended on the erased question or its frozen
+      // source ranges, including older revisions of a now independent claim.
+      const removedReferenceVersions = new Set<string>();
+      for (const row of this.db.prepare(`SELECT v.id,v.revision,v.payload,a.revision AS current_revision
+        FROM h_assertion_versions v JOIN h_assertions a ON a.id=v.id
+        WHERE json_type(v.payload,'$.referenceContexts') IS NOT NULL`).all()) {
+        const assertion = JSON.parse(String(row.payload)) as Assertion;
+        if (!(assertion.referenceContexts || []).some(reference => fence.objectIds.includes(reference.messageId)
+          || fence.sourceIds.includes(reference.messageId) || eventIds.has(reference.messageId) || affected.has(reference.messageId)
+          || (fence.spans || []).some(span => span.eventId === reference.messageId)
+          || reference.sourceRefs.some(ref => fence.sourceIds.includes(ref.eventId) || eventIds.has(ref.eventId)
+            || (redactedRanges.get(ref.eventId) || []).some(range => range.contentVersion !== ref.contentVersion
+              || range.start < ref.end && range.end > ref.start)))) continue;
+        removedReferenceVersions.add(String(row.id) + ':' + Number(row.revision));
+        if (Number(row.revision) === Number(row.current_revision)) {
+          affected.add(String(row.id));
+          for (const dependent of this.invalidate(String(row.id), 'source_deleted', preserved)) affected.add(dependent);
+        } else this.db.prepare('DELETE FROM h_assertion_versions WHERE id=? AND revision=?').run(String(row.id), Number(row.revision));
+      }
+      if (removedReferenceVersions.size) for (const row of this.db.prepare(`SELECT id,json_extract(payload,'$.contextReceipt.providedObjectVersions') AS versions
+        FROM messages WHERE role='assistant' AND json_type(payload,'$.contextReceipt.providedObjectVersions')='array'`).all()) {
+        const versions = JSON.parse(String(row.versions)) as ContextReceipt['providedObjectVersions'];
+        if (!versions.some(version => version.kind === 'assertion' && (affected.has(version.id)
+          || removedReferenceVersions.has(version.id + ':' + version.revision)))) continue;
+        affected.add(String(row.id));
+        for (const dependent of this.invalidate(String(row.id), 'source_deleted', preserved)) affected.add(dependent);
+      }
+      for (const id of affected) {
+        if (preserved.has(id)) continue;
+        this.removeAssertion(id);
+        const calendar = this.db.prepare('SELECT agenda_id,revision FROM h_calendar_versions WHERE id=?').get(id);
+        if (calendar) {
+          this.db.prepare("DELETE FROM agenda WHERE id=? AND COALESCE(json_extract(payload,'$.revision'),1)=?").run(String(calendar.agenda_id), Number(calendar.revision));
+          this.db.prepare('DELETE FROM h_calendar_versions WHERE id=?').run(id);
+        }
+        const outputRow = this.db
+          .prepare("SELECT payload FROM messages WHERE id=? AND role='assistant'")
+          .get(id);
+        if (outputRow) {
+          const output = this.clearedMessage(JSON.parse(String(outputRow.payload)), "[Related sources changed; this old response is retired]");
+          this.db
+            .prepare('UPDATE messages SET content=?,payload=? WHERE id=?')
+            .run(output.content, JSON.stringify(output), id);
+        }
+        const worldRow = this.db.prepare('SELECT payload FROM h_worlds WHERE id=?').get(id);
+        if (worldRow) {
+          const world = JSON.parse(String(worldRow.payload));
+          world.status = 'stale';
+          world.assumptions = {};
+          world.baseline = [];
+          world.domainRefs = [];
+          world.evidenceIds = [];
+          this.db
+            .prepare("UPDATE h_worlds SET status='stale',payload=? WHERE id=?")
+            .run(JSON.stringify(world), id);
+        }
+        const work = parse<WorkRecord>(this.db.prepare('SELECT payload FROM h_work WHERE id=?').get(id));
+        if (work) {
+          const spatial = ['spatial_role', 'spatial_alias', 'spatial_crosswalk'].includes(String(work.data.type));
+          const protectedType = (work.sourceBinding || spatial) && typeof work.data.type === 'string' ? work.data.type : undefined;
+          const versions = spatial && Array.isArray(work.data.spatialBindingVersions)
+            && !fence.objectIds.includes(id) && !fence.sourceIds.includes(id) && !fence.sourceIds.includes('work:self')
+            ? work.data.spatialBindingVersions.map(value => this.spatialVersionMetadata(value)).filter((value): value is SpatialBindingVersionMetadata =>
+              !!value && !removedSpatialVersions.has(`${id}:${value.revision}`)) : [];
+          work.status = 'stale';
+          work.title = "Related sources were deleted; awaiting revalidation";
+          work.data = { ...(protectedType ? { type: protectedType } : {}), ...(versions.length ? { spatialBindingVersions: versions } : {}),
+            invalidationReason: 'source_deleted', requiresRebuild: true };
+          work.evidenceIds = work.evidenceIds.filter((e) => !eventIds.has(e));
+          // Retain only opaque source addresses as a replay barrier. Removing
+          // the typed binding would turn this into a generic sync/edit target.
+          this.db.prepare('DELETE FROM h_sync_operations WHERE object_id=?').run(work.id);
+          this.db
+            .prepare('UPDATE h_work SET status=?,title=?,payload=? WHERE id=?')
+            .run(work.status, work.title, JSON.stringify(work), id);
+        }
+        const action = parse<any>(this.db.prepare('SELECT payload FROM h_actions WHERE id=?').get(id));
+        if (action) {
+          action.status = ['dispatching', 'outcome_unknown', 'reconciling', 'succeeded', 'cancel_requested'].includes(action.status)
+            ? 'cancel_requested' : 'cancelled';
+          action.arguments = {};
+          delete action.compensation;
+          action.audience = 'redacted';
+          action.reason = redactedPlanningActions.has(id) ? 'planning_source_deleted_details_removed' : 'source_deleted_details_removed';
+          this.db.prepare('UPDATE h_actions SET status=?,payload=? WHERE id=?').run(action.status, JSON.stringify(action), id);
+          if (!preservedAgendaIds.has(id)) this.db.prepare('DELETE FROM agenda WHERE id=?').run(id);
+        }
+      }
+      for (const item of preservedBusiness) {
+        const action = parse<any>(this.db.prepare('SELECT payload FROM h_actions WHERE id=?').get(item.actionId));
+        if (action?.compensation?.previous) {
+          // Retain the current approved object, not earlier private versions.
+          delete action.compensation;
+          action.reason = 'prior_business_version_removed_with_conversation';
+          this.db.prepare('UPDATE h_actions SET payload=? WHERE id=?').run(JSON.stringify(action), action.id);
+        }
+      }
+      // Derived views are cheap and are rebuilt only from surviving sources; never keep old textual summaries.
+      this.db
+        .prepare(`DELETE FROM h_work WHERE kind IN ('experience','hypothesis','feedback') AND status='stale'
+          AND COALESCE(json_extract(payload,'$.data.type'),'') NOT IN ('spatial_role','spatial_alias','spatial_crosswalk')`)
+        .run();
+      this.db.prepare('DELETE FROM h_proposals').run();
+      const survivingMethodChoices = this.db.prepare("SELECT id,result FROM h_operations WHERE kind='personal_method_choice'").all()
+        .filter(row => this.personalMethodChoiceSurvivesCleanup(String(row.id), row.result, fence)).map(row => String(row.id));
+      this.db.prepare('DELETE FROM h_operations WHERE id NOT IN (SELECT value FROM json_each(?))')
+        .run(JSON.stringify(survivingMethodChoices));
+      this.db.prepare('DELETE FROM h_runs').run();
+      this.db
+        .prepare("UPDATE h_jobs SET payload='{}',status='cancelled',fence=fence+1 WHERE status='cancelled'")
+        .run();
+      this.db.prepare("DELETE FROM h_outbox WHERE status='cancelled'").run();
+      if (this.db.prepare("SELECT name FROM sqlite_master WHERE name='sessions'").get())
+        this.db.prepare("UPDATE sessions SET summary='',summary_count=0").run();
+      for (const sessionId of fence.deletedConversationIds || []) {
+        if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='sessions'").get()) this.db.prepare('DELETE FROM sessions WHERE id=?').run(sessionId);
+        if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='meta'").get()) this.db.prepare('DELETE FROM meta WHERE key=?').run('draft:' + sessionId);
+      }
+      eraseSemanticChunks(this.db, { eventIds: [...eventIds], sourceIds: fence.sourceIds,
+        ranges: [...redactedRanges].flatMap(([eventId, ranges]) => ranges.map(range => ({ eventId, ...range }))) });
+      this.db.prepare('DELETE FROM h_meta WHERE instr(key,?)=1').run('semantic_index_checkpoint:');
+      this.pruneSemanticIndex();
+      this.setMeta('cleaned_fence:' + fence.id, true);
+    });
+    this.clearMigrationBackups();
+    this.revalidatePrivacyJobs();
+    this.afterCommit(() => { for (const callback of this.privacyCleanupListeners) callback(); });
+  }
+  private removeAssertion(id: string) {
+    this.db.prepare('DELETE FROM h_assertion_fts WHERE id=?').run(id);
+    this.db.prepare("DELETE FROM h_grams WHERE kind='assertion' AND object_id=?").run(id);
+    this.db.prepare('DELETE FROM h_assertions WHERE id=?').run(id);
+    if (this.db.prepare("SELECT name FROM sqlite_master WHERE name='memories'").get())
+      this.db.prepare('DELETE FROM memories WHERE id=?').run(id);
+  }
+  private clearedMessage(message: Record<string, any>, content: string) {
+    // Retain only structural fields. New semantic payloads (drafts, images,
+    // alternate response text, future extensions) must not escape deletion.
+    return { id: message.id, sessionId: message.sessionId, role: message.role, createdAt: message.createdAt,
+      status: message.status === 'running' ? 'cancelled' : message.status, retention: message.retention,
+      content: message.role === 'assistant' ? '' : content, steps: [], obligations: [], actions: [],
+      ...(message.role === 'assistant' ? { hostStatus: { kind: 'notice', code: 'source_changed',
+        text: "A source in this old response was removed." } } : {}) };
+  }
+  private removeMessageAttachment(messageId: string, sourceEventId: string, authoredText: string) {
+    const row = this.db.prepare("SELECT payload FROM messages WHERE id=? AND role='user'").get(messageId);
+    const message = row && JSON.parse(String(row.payload)) as Message | undefined;
+    if (!message?.attachments?.some(item => item.sourceEventId === sourceEventId)) return false;
+    message.attachments = message.attachments.filter(item => item.sourceEventId !== sourceEventId);
+    message.content = authoredText;
+    this.db.prepare('UPDATE messages SET content=?,payload=? WHERE id=?').run(message.content, JSON.stringify(message), messageId);
+    return true;
+  }
+  private redactLegacyMessage(id: string, content: string) {
+    if (!this.db.prepare("SELECT name FROM sqlite_master WHERE name='messages'").get()) return;
+    const row = this.db.prepare('SELECT payload,session_id FROM messages WHERE id=?').get(id);
+    if (!row) return;
+    const original = JSON.parse(String(row.payload)) as Message;
+    const message: ReturnType<KernelRepository['clearedMessage']> & { attachments?: Message['attachments'] } = this.clearedMessage(original, content);
+    const parent = this.db.prepare('SELECT status FROM h_evidence WHERE id=?').get(id);
+    if (original.role === 'user' && original.attachments && parent?.status === 'redacted') {
+      message.attachments = original.attachments.filter(item => {
+        if (!item.sourceEventId || this.hasFence(item.sourceEventId)) return false;
+        const event = parse<EvidenceEvent>(this.db.prepare('SELECT payload FROM h_evidence WHERE id=?').get(item.sourceEventId));
+        return !!event && event.status === 'active' && event.parentEventId === id && !this.sourceLineageRestricted(event)
+          && !this.db.prepare('SELECT 1 FROM h_source_restrictions WHERE event_id=? LIMIT 1').get(event.id);
+      });
+    }
+    this.db
+      .prepare('UPDATE messages SET content=?,payload=? WHERE id=?')
+      .run(message.content, JSON.stringify(message), id);
+    // Assistant messages may repeat the erased source without a precise locator. Redact that derived session conservatively.
+    for (const output of this.db
+      .prepare("SELECT id,payload FROM messages WHERE session_id=? AND role='assistant'")
+      .all(row.session_id as string)) {
+      const m = this.clearedMessage(JSON.parse(String(output.payload)), "[Related sources changed; this old response is retired]");
+      this.db
+        .prepare('UPDATE messages SET content=?,payload=? WHERE id=?')
+        .run(m.content, JSON.stringify(m), output.id as string);
+    }
+    this.db
+      .prepare("UPDATE sessions SET title='Organized conversation',summary='',summary_count=0 WHERE id=?")
+      .run(row.session_id as string);
+    this.db.prepare('DELETE FROM meta WHERE key=?').run('draft:' + row.session_id);
+  }
+  checkpointPrivacy() {
+    if (this.databasePath !== ':memory:') {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    }
+  }
+}

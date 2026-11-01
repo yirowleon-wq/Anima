@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "scene": "soyo-listening-rain-literary-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "dca2dd09063832af700bcb833ddaae40cde16b01aed2d27429204762cd3c7210",
+    "background": "55cef6e80b38143e14131d51b92f817e19f9ebb23417c900d3999cf5ea843156",
+    "F": "3be733fa9a261ca69af69642f39b9bb042b84cb30462a56dd3c44c2ece59c38f",
+    "S": "63587481505e221520af104603404157df6aa018105796a171b178009aa1165c"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        731,
+        138,
+        1271,
+        899
+      ],
+      "normalized": [
+        0.4759114583333333,
+        0.134765625,
+        0.8274739583333334,
+        0.8779296875
+      ],
+      "basis": "Read-only MAX(L(F),L(S)) >32 envelope; includes actual local receiver material and soft shoe grounding."
+    }
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

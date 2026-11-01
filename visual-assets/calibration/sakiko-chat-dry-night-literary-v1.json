@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-chat-dry-night-literary-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "c56541389158a7f28539062ae2174da997b4cd4301e022eab9202e34d31ab5c1",
+    "background": "edad31b1ce0c7f21be59d939cc54a0d6230b31d6fe380d0d553af515032fd0f4",
+    "F": "e0d20ccc2327b95867319151a5c9fdd52b69008c718fdd5ddaff01a3f6259cea",
+    "S": "830db3da88d90f283f6e867cfe56b1389cd6a2a4152b50de1532266f0f4224f6"
+  },
+  "visibleGeometry": {
+    "dominantCoverageBBoxSourcePixels": [
+      881,
+      110,
+      1357,
+      925
+    ],
+    "actualPersonDominantCoverageBBox": [
+      895,
+      110,
+      1357,
+      915
+    ],
+    "includedReceiverDominantCoverageBBox": [
+      881,
+      539,
+      1343,
+      925
+    ]
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

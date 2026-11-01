@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "sakiko-neutral-reading-time-night-included-v1",
+  "sceneFamily": "literary-room-v1",
+  "character": "sakiko",
+  "activity": "reading",
+  "purpose": "neutral-presence",
+  "neutralTime": "night",
+  "light": "night",
+  "palette": "rain",
+  "width": 1536,
+  "height": 1024,
+  "mother": "sakiko-neutral-reading-time-night-included-v1-mother.png",
+  "background": "sakiko-neutral-reading-time-night-included-v1-background.png",
+  "mask": "sakiko-neutral-reading-time-night-included-v1-mask.png",
+  "maskMode": "luminance",
+  "contactMask": "sakiko-neutral-reading-time-night-included-v1-contact-mask.png",
+  "seat": [
+    0.7682291666666666,
+    0.580078125
+  ],
+  "ground": [
+    0.58984375,
+    0.8935546875
+  ],
+  "bodyBounds": [
+    0.5364583333333334,
+    0.1552734375,
+    0.8645833333333334,
+    0.8994140625
+  ],
+  "safeTextBoundary": 0.5208333333333334,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "53.645833333333336% 15.52734375%, 86.45833333333334% 15.52734375%, 86.45833333333334% 89.94140625%, 53.645833333333336% 89.94140625%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "2d571adc2146dd779954f0d014ef015b658a83250d6626d707dcece3c6335d8e",
+      "background": "fe3d14cd347137c1ee8df22c68fb7b474978c207377b39f3fe0cb674f71c6c92",
+      "F": "2fd336732827df3443f20575a3b5395f6838af11efe37de1ac0cf19eefd7b4ef",
+      "S": "1357edba99df8624e3d94dc6bd55b1a76a5ecf32ded0b463d5a9c74f52c4b819"
+    },
+    "geometryEvidence": {
+      "jointReceiverEnvelope": {
+        "sourcePixels": [
+          804,
+          159,
+          1328,
+          928
+        ],
+        "normalized": [
+          0.5234375,
+          0.1552734375,
+          0.8645833333333334,
+          0.90625
+        ],
+        "basis": "Read-only MAX(L(F),L(S)) >32 envelope, including fixed original local receiver material."
+      },
+      "familyFramingUnchanged": true
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/sakiko-neutral-reading-time-night-included-v1.json"
+  }
+}

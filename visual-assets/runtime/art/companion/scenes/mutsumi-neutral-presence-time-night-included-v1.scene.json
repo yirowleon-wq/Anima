@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "mutsumi-neutral-presence-time-night-included-v1",
+  "sceneFamily": "literary-room-v1",
+  "character": "mutsumi",
+  "activity": "chat",
+  "purpose": "neutral-presence",
+  "neutralTime": "night",
+  "light": "night",
+  "palette": "rain",
+  "width": 1536,
+  "height": 1024,
+  "mother": "mutsumi-neutral-presence-time-night-included-v1-mother.png",
+  "background": "mutsumi-neutral-presence-time-night-included-v1-background.png",
+  "mask": "mutsumi-neutral-presence-time-night-included-v1-mask.png",
+  "maskMode": "luminance",
+  "contactMask": "mutsumi-neutral-presence-time-night-included-v1-contact-mask.png",
+  "seat": [
+    0.7903645833333334,
+    0.6103515625
+  ],
+  "ground": [
+    0.703125,
+    0.9091796875
+  ],
+  "bodyBounds": [
+    0.572265625,
+    0.125,
+    0.8626302083333334,
+    0.9091796875
+  ],
+  "safeTextBoundary": 0.5442708333333334,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "57.2265625% 12.5%, 86.26302083333334% 12.5%, 86.26302083333334% 90.91796875%, 57.2265625% 90.91796875%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "ecd0ac024c414ae54c94558301e4eeb7d1e4e773cc264a195044fe9030088e36",
+      "background": "3f01b081128e75e150652fabdaed9f2babde2410e16462d842e0683257c694dd",
+      "F": "9e25e904f56f9577cf55db97a5f9904bd5a7748a5ff4d796e6327245defdaec0",
+      "S": "4296a97883d68a7b5b19592cefce6c0b708cd1eabba73df1765f59e7337c73e3"
+    },
+    "geometryEvidence": {
+      "jointReceiverEnvelope": {
+        "sourcePixels": [
+          852,
+          128,
+          1325,
+          957
+        ],
+        "normalized": [
+          0.5546875,
+          0.125,
+          0.8626302083333334,
+          0.9345703125
+        ],
+        "basis": "Read-only MAX(L(F),L(S)) >32 envelope, complete actual fixed seat/wood receiver included, not tightened."
+      },
+      "familyFramingCodeUnchanged": true
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/mutsumi-neutral-presence-time-night-included-v1.json"
+  }
+}

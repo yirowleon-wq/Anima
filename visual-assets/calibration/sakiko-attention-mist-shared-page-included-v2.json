@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-attention-mist-shared-page-included-v2",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "0bb53a305da106c8e499cc3c97cb9c399e8958ce421c5077a97631683ae2bb88",
+    "background": "db4e12b935f35db0a1351fda73714b6d7de7668d842ee07ebadf6c9c41650c1f",
+    "F": "674382410a477e70b8a22085e024f2e292d83c3c7d070daf05e30b0c0c1e47ab",
+    "S": "01b4fe55552c04a7d4340bcc5b210a157d6eb6b3c274cbbaa41b308122f29b7f"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        891,
+        114,
+        1354,
+        939
+      ],
+      "normalized": [
+        0.580078125,
+        0.111328125,
+        0.8815104166666666,
+        0.9169921875
+      ],
+      "basis": "sRGB Rec.709 luminance; F >32, S >32 and MAX(L(F),L(S)) >32 are read-only envelope metadata only. Original continuous ImageGen mask PNG bytes and runtime luminance are unchanged; no thresholded or hand-edited image is created."
+    },
+    "candidateSevenUnionPixels": [
+      762,
+      86,
+      1378,
+      955
+    ],
+    "candidateSevenProtectedPixels": [
+      666,
+      74,
+      1474,
+      967
+    ],
+    "candidateSevenProtectedHeight": 893,
+    "cameraFunctionModified": false
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

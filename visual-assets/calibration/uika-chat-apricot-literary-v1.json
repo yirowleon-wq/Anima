@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scene": "uika-chat-apricot-literary-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "df94d1a87f41775108d5b319a6bcc8ec4372283b770ef05ae764adedf2500c5d",
+    "background": "f9a1a6a33c682a27dd2a8bf40ff361e0c9ceed52bbc7bd811db70694bef8664c",
+    "F": "937cb2e07ce767950ef7f113a8a3131f5b2f21569bd09fcb391050ae88004bea",
+    "S": "eae4756cefb4ab68ff3f596128972eac539ca40f664487532e92afd4743f22fd"
+  },
+  "visibleGeometry": {
+    "actualPersonDominantCoverageBBox": [
+      846,
+      116,
+      1319,
+      875
+    ],
+    "includedReceiverDominantCoverageBBox": [
+      828,
+      468,
+      1330,
+      883
+    ]
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

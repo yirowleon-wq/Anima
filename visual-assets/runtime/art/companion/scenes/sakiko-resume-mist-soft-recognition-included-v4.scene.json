@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "id": "sakiko-resume-mist-soft-recognition-included-v4",
+  "sceneFamily": "literary-room-v1",
+  "character": "sakiko",
+  "activity": "resume",
+  "purpose": "activity",
+  "light": "morning",
+  "environmentVariant": "overcast-day",
+  "palette": "mist",
+  "width": 1536,
+  "height": 1024,
+  "mother": "sakiko-resume-mist-soft-recognition-included-v4-mother.png",
+  "background": "sakiko-resume-mist-soft-recognition-included-v4-background.png",
+  "mask": "sakiko-resume-mist-soft-recognition-included-v4-mask.png",
+  "maskMode": "luminance",
+  "contactMask": "sakiko-resume-mist-soft-recognition-included-v4-contact-mask.png",
+  "seat": [
+    0.7682291666666666,
+    0.591796875
+  ],
+  "ground": [
+    0.5944010416666666,
+    0.8994140625
+  ],
+  "bodyBounds": [
+    0.5286458333333334,
+    0.083984375,
+    0.8971354166666666,
+    0.9091796875
+  ],
+  "safeTextBoundary": 0.490234375,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "52.864583333333336% 8.3984375%, 89.71354166666666% 8.3984375%, 89.71354166666666% 90.91796875%, 52.864583333333336% 90.91796875%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "9c9e2aa283a1d809a3e6edf9f574e026de3046093e6c8dcd8b7c0316961dc624",
+      "background": "cb609191291dfa5ff189878c890569ea4377cecded41b1962feb14746db3d7ad",
+      "F": "a48c3f85d41b27e58eb3080cf6e3279edd743bb509da669e47793e2fc292941a",
+      "S": "4dcb075e2072eeb42c44a2caba82f50c48335eccce9e537ba81f7cb72f89afb0"
+    },
+    "geometryEvidence": {
+      "jointReceiverEnvelope": {
+        "sourcePixels": [
+          769,
+          86,
+          1378,
+          955
+        ],
+        "normalized": [
+          0.5006510416666666,
+          0.083984375,
+          0.8971354166666666,
+          0.9326171875
+        ],
+        "basis": "sRGB Rec.709 luminance; F >32, S >32 and MAX(L(F),L(S)) >32 are read-only envelope metadata only. Original continuous ImageGen mask PNG bytes and runtime luminance are unchanged; no thresholded or hand-edited image is created."
+      },
+      "candidateSevenUnionPixels": [
+        762,
+        86,
+        1378,
+        955
+      ],
+      "candidateSevenProtectedPixels": [
+        666,
+        74,
+        1474,
+        967
+      ],
+      "candidateSevenProtectedHeight": 893,
+      "cameraFunctionModified": false
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/sakiko-resume-mist-soft-recognition-included-v4.json"
+  }
+}

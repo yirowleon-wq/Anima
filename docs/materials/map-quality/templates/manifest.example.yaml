@@ -1,0 +1,38 @@
+template_only: true
+scope_id: __UNSET__
+baseline_commit: null
+integration_commit: null
+schema_version: null
+alignment_version: null
+normal_data_hash: null
+runtime_generator_hash: null
+style_hash: null
+rule_version: null
+aoi:
+  geometry_locator: null
+  geometry_hash: null
+  surrounding_navigation_extent: null
+  approved_scope_locator: null
+zones: []
+category_set_locator: null
+all_entity_ids_locator: null
+all_entity_ids_hash: null
+key_entity_ids_locator: null
+runtime_instance_mapping_locator: null
+external_missing_candidates_locator: null
+screenshot_issue_mapping_locator: null
+retired_merged_excluded_decisions_locator: null
+thresholds_locator: null
+coverage:
+  baseline_count: null
+  added: null
+  merged_or_retired_with_evidence: null
+  final_count: null
+  unchecked_count: null
+  blocked_count: null
+  stale_count: null
+acceptance_roles:
+  implementation_owner: null
+  independent_reviewer: null
+  designated_acceptor: null
+  authorization_locator: null

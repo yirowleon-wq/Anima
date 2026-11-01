@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "scene": "mutsumi-chat-apricot-literary-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "9d529789ece89f44b166f39dd259136257598cfd546009e49fae74140cbf8b6d",
+    "background": "f9a1a6a33c682a27dd2a8bf40ff361e0c9ceed52bbc7bd811db70694bef8664c",
+    "F": "a6d6cef3414154b5201be221e9192b8ce7c42406d4757f893cf16fa0e5824977",
+    "S": "469d1c34a02afa1616626e18300994099bf5f28d4b761b655ed0dcff2b6788b1"
+  },
+  "visibleGeometry": {
+    "bodyEnvelope": [
+      0.585938,
+      0.102539,
+      0.904948,
+      0.888672
+    ],
+    "FWholeCoverageDominantPixelBBox": [
+      918,
+      113,
+      1359,
+      897
+    ],
+    "receiverCoverageDominantPixelBBox": [
+      898,
+      547,
+      1376,
+      902
+    ]
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

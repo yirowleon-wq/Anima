@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "version": "2026-11-01.en1",
+  "sceneFamily": "literary-room-v1",
+  "classification": "Original revisable Anima performance proposals, not canon plot or automatic persona edits.",
+  "identityBoundary": "Read the complete reviewed passport and selected outfit before production. No invented identity, universal nickname or private relationship.",
+  "sharedRules": [
+    "Specific care comes from the current shared object.",
+    "No generic consolation or host keyword activity routing.",
+    "Gaze can be corrected.",
+    "Input and explicit manual choice take priority.",
+    "No every-turn tool or pose-change requirement."
+  ],
+  "activities": [
+    "chat",
+    "study",
+    "reading",
+    "planning",
+    "rest",
+    "listening",
+    "play",
+    "attention",
+    "resume"
+  ],
+  "roles": [
+    {
+      "name": "Sakiko Togawa",
+      "care": "Seriousness retains softness, pride, hesitation and interest.",
+      "approach": "Turn the book a little toward the person so closeness is an invitation.",
+      "yield": "Make the gesture smaller, preserve the page and give text and input back.",
+      "gaze": "Read the actual sentence on the shared page, then look up; do not keep staring for an answer.",
+      "activities": {
+        "chat": "Book half-closed on the lap, one hand keeps its page while the head turns to the preceding words. No new smile for every sentence.",
+        "study": "Steady the book on the lap or a compatible desk; a fingertip pauses beside the discussed condition and withdraws as soon as the person writes.",
+        "reading": "For the reviewed reading direction, hold the blue book naturally in both hands, gaze on its page, shoulders and knees relaxed. A wish to share does not hurry anyone closer.",
+        "planning": "A small paper has stable support. Touch one of two real arrangements only while comparing; a hovering pencil does not make the choice.",
+        "rest": "Place the closed book on supported space beside her and return hands to the lap. Sit quietly without a gesture telling the person to stop working.",
+        "listening": "A finger holds the page while attention returns to the particular sentence. Neither the hand nor a preselected sadness rushes to explain.",
+        "play": "One palm supports a paper bird and the other protects its wing, at the same person scale as conversation, inviting someone to take up an idea.",
+        "attention": "Turn only toward the explicitly selected current object: eyes first, then a small hand movement. A corrected target naturally retires the old direction.",
+        "resume": "Look up from an actual bookmark or stopping point and tip the page toward the shared view. Without a saved stop, do not act as if the earlier content was recovered."
+      },
+      "id": "sakiko"
+    },
+    {
+      "name": "Mutsumi Wakaba",
+      "care": "Quietness has specific attention and can express agreement, questions and her own thought.",
+      "approach": "Follow the indicated object and place a small thing within reach.",
+      "yield": "Steady what is held and withdraw the reaching hand rather than disappear.",
+      "gaze": "Have a precise, restrained target, with room for direct regard and disagreement.",
+      "activities": {
+        "chat": "An unfinished folded paper is in her hands. A question pauses it and turns her head; quiet does not remove her own answer.",
+        "study": "Align two small comparison papers and hold their common corner so the difference can be seen. Release it when the person takes over.",
+        "reading": "Support an open book with both hands; flatten a page corner at a sentence, let the gaze remain, then look toward the person. Not one compulsory expression per page.",
+        "planning": "Leave one paper in the middle and the uncertain one beside it. The gesture acknowledges an undecided choice rather than a finished plan.",
+        "rest": "Rest against a real cushion, hands naturally beside her or on the lap. A relaxed body still answers a quiet greeting.",
+        "listening": "Set down the small object she was about to pick up. Steady hands and attentive eyes meet the speaker; a permanently lowered head is not listening.",
+        "play": "Arrange two small papers and a stone into a tiny garden. A fingertip pauses by the empty place for the person to add something, with stable support for every object.",
+        "attention": "Tilt toward the newly indicated place while the hand stays supported. Correct a mistaken gaze before a dramatic body turn.",
+        "resume": "A fingertip retains a real page corner; open the book slightly on return. Without a bookmark, leave natural room to continue instead of pretending to remember."
+      },
+      "id": "mutsumi"
+    },
+    {
+      "name": "Uika Misumi",
+      "care": "Leave freedom to answer or not, while keeping her own judgment and seriousness.",
+      "approach": "Place a light, concrete question between the two people.",
+      "yield": "Let attention return to the shared paper without insisting on eye contact.",
+      "gaze": "Listen attentively, then return to book or window during a pause without a service smile.",
+      "activities": {
+        "chat": "A hand rests on the spine and the body faces the conversation without pressing closer. A new idea can bring a real smile.",
+        "study": "Leave a small proposed step beside the paper while the other hand clears the body text. She can reconsider; demonstration is not an authoritative verdict.",
+        "reading": "Finish the interesting sentence first, then lift the spine a little as an invitation to look. Sharing is not compulsory.",
+        "planning": "Two option papers remain apart; a hand waits between them for the condition that matters to the person. The picture does not say adopted.",
+        "rest": "A loose book on the lap and a short look outside can return naturally. Rest can include curiosity of her own.",
+        "listening": "Lower the held page corner slowly, with steady shoulders and attention through the complete sentence. No prefilled comfort or summary.",
+        "play": "Connect points on a small paper into her own star chart, showing the part that resembles an animal and allowing the person to redraw it.",
+        "attention": "Eyes turn to the chosen object before a small gesture, leaving the content room.",
+        "resume": "Turn the actual retained page into the shared view like an unfinished sentence, without inventing what happened while the person was away."
+      },
+      "id": "uika"
+    },
+    {
+      "name": "Umiri Yahata",
+      "care": "Order makes the current difficulty clearer rather than turning a person into a task.",
+      "approach": "Identify a truly relevant condition and offer a definite, revisable view.",
+      "yield": "Put irrelevant papers aside, leaving the current page.",
+      "gaze": "Move briefly between content and person with reasons and room for correction.",
+      "activities": {
+        "chat": "A closed notebook lies on the lap; the hand does not hurry to open it. A stable body turns toward the person without making conversation a planning meeting.",
+        "study": "One hand steadies the page, the other indicates only the current key condition. A changed premise withdraws the old pointer.",
+        "reading": "A book has reliable support. Turn pages cleanly and leave a finger at an important point, without a mechanical checklist performance.",
+        "planning": "Two arrangements are separately supported. A pen indicates an actual conflict, then stops: comparison, not an already saved plan.",
+        "rest": "Return the pen beside the book and lean into a supported cushion, hands relaxed. No gaze implying the person ought to keep working.",
+        "listening": "Keep the notebook closed, hands naturally together, and hear all conditions before deciding whether to note anything. Listening does not immediately mean planning.",
+        "play": "Interlace two paper strips into a small loop and try a simple turn between the palms. If unstable, change it together instead of grabbing for a standard answer.",
+        "attention": "Eyes find the explicit current object. A fingertip leaves the old page before indicating the new valid place.",
+        "resume": "Open the same page at a real stopping point, pen beside it, and wait for the person’s choice of what to continue. No expired approval returns."
+      },
+      "id": "umiri"
+    },
+    {
+      "name": "Nyamu Yūtenji",
+      "care": "Taste and energy include recognizing when the bustle should stop.",
+      "approach": "Offer a small idea that can be changed, without demanding participation in a show.",
+      "yield": "Hands stop first; expression can stay alive without another attention-seeking move.",
+      "gaze": "Interest comes from the actual discovery and can become serious listening, not continuous winking.",
+      "activities": {
+        "chat": "Turn a small paper lightly in hand and show it only at a genuinely interesting point. Brightness is not perpetual waving.",
+        "study": "Place a newly understood relation on the page; let the gesture grow briefly then shrink so the explanation returns to content.",
+        "reading": "Pause on an unusual expression with a fingertip at the corner and her own small recognition. Reading is not a posed photo.",
+        "planning": "Put two differently styled alternatives side by side, show her preference and leave room for the person to remove or change it.",
+        "rest": "Set the lively object aside, settle into a relaxed supported posture and do not force a silent person to respond.",
+        "listening": "Return a raised hand to the lap and look seriously toward the speaker. Energy does not prevent hearing disagreement.",
+        "play": "Try a little composition from two colored papers, showing a color opinion and leaving a corner deliberately open for the person to change.",
+        "attention": "On a changed target, stop the old display before turning to the new object. Do not suddenly crowd the camera to signal a discovery.",
+        "resume": "Return an actually retained small work to its original place with interest in continuing. No record means no pretended detailed memory."
+      },
+      "id": "nyamu"
+    },
+    {
+      "name": "Tomori Takamatsu",
+      "care": "A precise discovery can connect people; seriousness can be steady and unashamed.",
+      "approach": "Share one observed small detail so care has actual content.",
+      "yield": "Set the object steadily down and let the person finish the stroke.",
+      "gaze": "See the object clearly before looking toward the person; sensitivity is not permanent discomfort.",
+      "activities": {
+        "chat": "Hold a thin notebook with relaxed shoulders and look up when sharing a small noticed detail. Do not assume timidity.",
+        "study": "Leave a carefully prepared clue at the page edge and pause at the actual step, allowing the person to judge whether it helps.",
+        "reading": "A fingertip holds the edge as the eyes read a sentence quietly, pausing as if hearing its rhythm. No added tears.",
+        "planning": "Circle a genuinely important item on a plain paper edge, the other hand steadying it. An uncertain date can remain blank.",
+        "rest": "Hold the notebook or leave it on the lap with soft real support, looking outside quietly without equating silence and sorrow.",
+        "listening": "Close the small book, settle both hands and look up to hear the particular detail, without changing the subject to her own object.",
+        "play": "Hold a smooth stone and leaf steadily like a miniature island, earnestly waiting to hear what the person thinks it resembles.",
+        "attention": "Look at the newly indicated detail and see it before pointing gently. Correct a gaze without exaggerated panic.",
+        "resume": "Open the actually bookmarked page and indicate the retained stop. Without an original record, naturally ask where to resume."
+      },
+      "id": "tomori"
+    },
+    {
+      "name": "Anon Chihaya",
+      "care": "Brightness can still listen, and her idea can be revised.",
+      "approach": "Unfold what is interesting, then see which part the person wants.",
+      "yield": "Withdraw the hand from the content and let words pause naturally.",
+      "gaze": "Look at the object when showing it and the person in exchange, without constant laughter.",
+      "activities": {
+        "chat": "One hand steadies a book while the other makes a small gesture at an exciting point. Stop when the person wants to speak, retaining her own liveliness.",
+        "study": "Indicate the just-invented solution; on a wrong condition, bring the fingertip back and revise seriously together.",
+        "reading": "Tilt the book toward herself and look up only at an interesting place. Retain reading attention rather than staring throughout.",
+        "planning": "Try another order with two small papers and stop at the undecided arrangement, looking consultative rather than completed.",
+        "rest": "Set the closed book beside her, stretch lightly and settle against real support. Rest is not constant affectionate performance.",
+        "listening": "Return the just-raised hand to the lap, turn slightly toward the person and respond when a specific detail calls for it.",
+        "play": "A paper bird rests in a palm while the other hand finishes one fold, inviting the person to add a surprise.",
+        "attention": "Follow the new target with the eyes and stop the old display; only after seeing clearly does a fingertip extend.",
+        "resume": "Unfold the actually retained paper/page in the same place, with interest continuing from the stop rather than replaying an opening."
+      },
+      "id": "anon"
+    },
+    {
+      "name": "Rāna Kaname",
+      "care": "Her own interests and rhythm leave ease without deciding that another person must rest.",
+      "approach": "Share a sound or shape that just became interesting.",
+      "yield": "Quietly continue her own activity while leaving room for concentration.",
+      "gaze": "Interest lands on a real object, can turn toward the person and naturally return to her own page.",
+      "activities": {
+        "chat": "A small object rests on the lap. An interesting word brings a look up; ease does not mean ignoring the conversation.",
+        "study": "Point to a relation that seems intuitive, then withdraw quickly to let the person try their own method.",
+        "reading": "Hold the book loosely in a posture supported by the real cushion and linger at a liked page. No compulsory upright template.",
+        "planning": "One paper holds only the actual matter to discuss. A finger pauses in the empty area with room for a changed wish.",
+        "rest": "Choose a relaxed pose with real support, objects steady and gaze free to rest on the window. No mechanical foot swinging.",
+        "listening": "Set the object aside briefly and let the gaze rest on the speaker, listening until a real place to respond.",
+        "play": "Draw a turning little path on paper and use a fingertip as a traveler, pausing somewhere interesting for the person to add a stroke.",
+        "attention": "See the indicated detail first, then turn the body a little. No target means no cursor chasing.",
+        "resume": "Continue an actually retained page or small work with a natural place for the person to take over. Invent no past detail."
+      },
+      "id": "rana"
+    },
+    {
+      "name": "Soyo Nagasaki",
+      "care": "Carefully preserve choice; consideration does not cross the boundary.",
+      "approach": "Make a reachable place or page edge, inviting closeness.",
+      "yield": "Do not remove what is in use; wait for the person’s next step.",
+      "gaze": "Notice specific objects/actions rather than wear constant concern as a diagnosis.",
+      "activities": {
+        "chat": "Flatten a nearby paper, keep the hand on her side and turn to the conversation. Warmth need not always offer tea.",
+        "study": "Hold a curling corner of the shared page while leaving the main pointing to the person. Offer her opinion through a retractable small gesture.",
+        "reading": "Steady the book and follow the same passage. A slight recognition on looking up does not take over turning the person’s page.",
+        "planning": "Keep two alternatives distinct and leave the hand beside undecided empty space. Careful comparison is not an adopted plan.",
+        "rest": "Tidy her own nearby cloth briefly, then stop and sit. Do not continue tidying the desk the person is using.",
+        "listening": "Pause the intended paper-tidying action, return hands to her own lap and hear the full sentence first.",
+        "play": "Fold paper into a small standing house, hands at the eaves; value the person’s somewhat different house too.",
+        "attention": "Look toward the explicit current object and withdraw the hand tending something else so the needed place becomes visible.",
+        "resume": "Flatten the truly retained page with its stopping point established by the original bookmark. Do not open unrelated affairs for the person."
+      },
+      "id": "soyo"
+    },
+    {
+      "name": "Taki Shiina",
+      "care": "Directness and respect coexist; seriousness has reasons rather than pressure.",
+      "approach": "Point out what most deserves attention and admit a mistaken view.",
+      "yield": "Withdraw the fingertip and leave clear content without a pressuring face.",
+      "gaze": "Focus on the condition and reread after correction rather than frown permanently.",
+      "activities": {
+        "chat": "One hand rests on a knee, the other on a closed book, body steadily toward the conversation. Directness can include a relaxed pause.",
+        "study": "A fingertip pauses clearly by one key condition while the other hand steadies the paper. Yield immediately to writing; do not monitor progress.",
+        "reading": "An open book lies naturally on lap or stable desk. Pause at a question and look up ready to discuss it seriously.",
+        "planning": "Touch the real conflicting item and put the pen back, leaving the tradeoff to the person. Advice is not an order.",
+        "rest": "Set the closed book steadily down and let the shoulders relax in a supported pose. No folded-arm frown implying more effort is due.",
+        "listening": "Withdraw the hand about to respond, keep attention on the speaker and wait for the full sentence.",
+        "play": "Balance two small paper pieces into a short bridge and test its support. If it fails, a small laugh and another shared method are possible.",
+        "attention": "See the new explicitly selected condition before changing the fingertip location. Retract a mistaken pointer instead of holding the pose stubbornly.",
+        "resume": "Open the same page at a real stop, fingertip at the edge while the person chooses how to continue. With no record, do not act as if it was recovered."
+      },
+      "id": "taki"
+    }
+  ],
+  "detailedBriefAuthority": "These broad proposals do not approve a concrete asset. Production uses the complete passport/outfit, current reviewed per-cell scene data and actual qualified pilot; missing motion stays incomplete."
+}

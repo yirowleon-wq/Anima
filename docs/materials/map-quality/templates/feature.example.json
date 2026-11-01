@@ -1,0 +1,55 @@
+{
+  "template_only": true,
+  "record_type": "feature",
+  "feature_id": "__UNSET__",
+  "source_feature_ids": [],
+  "name": null,
+  "name_status": "unknown",
+  "class": "__UNSET__",
+  "layer": "__UNSET__",
+  "zone_id": "__UNSET__",
+  "geometry": {
+    "locator": null,
+    "hash": null,
+    "kind": null,
+    "meaning": null
+  },
+  "crs_chain_id": null,
+  "source_refs": [],
+  "claim_refs": [],
+  "confidence_by_property": {
+    "name": "E0",
+    "footprint": "E0",
+    "height": "E0",
+    "entrances": "E0"
+  },
+  "source_conflicts": [],
+  "adopted_geometry_claim": null,
+  "relations": [],
+  "representation": {
+    "evidence_band": null,
+    "primitive_type": null,
+    "height_status": "unknown",
+    "height_m": null,
+    "height_interval_m": null,
+    "min_height_m": null,
+    "claim_refs": [],
+    "schematic_proxy": false
+  },
+  "style_token": null,
+  "owner_branch": null,
+  "unresolved_issue_ids": [],
+  "required_checks": [],
+  "check_refs": [],
+  "review_refs": [],
+  "status": {
+    "inventory": "UNINVENTORIED",
+    "geometry": "UNCHECKED",
+    "topology": "UNCHECKED",
+    "neighborhood": "UNCHECKED",
+    "class_consistency": "UNCHECKED",
+    "visual": "UNCHECKED",
+    "acceptance": "NOT_READY"
+  },
+  "dependency_fingerprint": null
+}

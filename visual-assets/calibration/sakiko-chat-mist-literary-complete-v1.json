@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-chat-mist-literary-complete-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "6cbd83def33cf8284056992f10315a98101002d8f36f4d3d497548b7b4b73b9f"
+  },
+  "visibleGeometry": {},
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

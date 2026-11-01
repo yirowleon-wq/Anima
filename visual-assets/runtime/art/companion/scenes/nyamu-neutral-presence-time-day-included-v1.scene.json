@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "nyamu-neutral-presence-time-day-included-v1",
+  "sceneFamily": "literary-room-v1",
+  "character": "nyamu",
+  "activity": "chat",
+  "purpose": "neutral-presence",
+  "neutralTime": "day",
+  "light": "morning",
+  "palette": "mist",
+  "width": 1536,
+  "height": 1024,
+  "mother": "nyamu-neutral-presence-time-day-included-v1-mother.png",
+  "background": "nyamu-neutral-presence-time-day-included-v1-background.png",
+  "mask": "nyamu-neutral-presence-time-day-included-v1-mask.png",
+  "maskMode": "luminance",
+  "contactMask": "nyamu-neutral-presence-time-day-included-v1-contact-mask.png",
+  "seat": [
+    0.7682291666666666,
+    0.5546875
+  ],
+  "ground": [
+    0.6510416666666666,
+    0.8466796875
+  ],
+  "bodyBounds": [
+    0.5735677083333334,
+    0.107421875,
+    0.8444010416666666,
+    0.853515625
+  ],
+  "safeTextBoundary": 0.5325520833333334,
+  "support": "window-seat",
+  "contactShadow": {
+    "mode": "included"
+  },
+  "contourComplete": true,
+  "hitPolygon": "57.356770833333336% 10.7421875%, 84.44010416666666% 10.7421875%, 84.44010416666666% 85.3515625%, 57.356770833333336% 85.3515625%",
+  "travel": 0,
+  "slope": 0,
+  "perspective": 0,
+  "review": {
+    "approvedByPrimary": true,
+    "runtimeAccepted": false,
+    "runtimeSourceSha256": {
+      "mother": "5df25df2667581917ee3e312218810da2424bcd573be4418b245ac7d05dc755d",
+      "background": "1ffa461cec7b1677fecb84b1b9b6979f4cb867bf6065ad79866d1d7688ded578",
+      "F": "b876a24a6c809f781abcbeeb58005a5dad9dba73d72d15e7267442bad4e3d5c5",
+      "S": "1676a9c48a2c910346cb0d5f6fa64ae88e0d92e3ce377e6e24fd55fdc279fda9"
+    },
+    "geometryEvidence": {
+      "jointReceiverEnvelope": {
+        "sourcePixels": [
+          834,
+          110,
+          1297,
+          893
+        ],
+        "normalized": [
+          0.54296875,
+          0.107421875,
+          0.8444010416666666,
+          0.8720703125
+        ],
+        "basis": "Read-only sRGB Rec.709 F >32 and MAX(L(F),L(S)) >32 geometry, right/bottom exclusive; original continuous PNG luminance unchanged."
+      },
+      "familyFramingUnchanged": true
+    },
+    "contactAssemblyRecord": "visual-assets/calibration/nyamu-neutral-presence-time-day-included-v1.json"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "template_only": true,
+  "record_type": "source",
+  "source_id": "__UNSET__",
+  "name": null,
+  "product": null,
+  "layer_or_dataset": null,
+  "source_type": null,
+  "locator": null,
+  "captured_on": null,
+  "published_on": null,
+  "accessed_on": null,
+  "is_schematic": null,
+  "declared_crs": null,
+  "axis_order": null,
+  "unit": null,
+  "independent_lineage_group": null,
+  "spatial_accuracy": {
+    "value_m": null,
+    "meaning": null,
+    "evidence": null
+  },
+  "roles": {
+    "name": null,
+    "ground_geometry": null,
+    "height": null,
+    "current_access_or_construction": null
+  },
+  "alignment_id": null,
+  "rights": {
+    "view": null,
+    "extract_or_trace": null,
+    "derive": null,
+    "cache": null,
+    "redistribute": null,
+    "code_or_data_license": null,
+    "terms_locator": null,
+    "authorization_locator": null,
+    "attribution": null
+  }
+}

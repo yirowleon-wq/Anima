@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "scene": "taki-attention-rain-literary-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "90a756337fbfb434a9de07ee77f0148b8e5619b58b88c8772ee2ed4f5355f912",
+    "background": "bda179e8aff5ab5e3649c9f6b6f1d55cb4fd9293e23288e31b3c91abf34fd042",
+    "F": "0be770c8723ff41ca7f4b15b4271b1dfb2cd14b4d8c6af164dc985007a664cf5",
+    "S": "be6d80af7f82835bab83527cdbefd3e2fc106ea558a38c4113465fceeaf8d751"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        824,
+        134,
+        1268,
+        882
+      ],
+      "normalized": [
+        0.5364583333333334,
+        0.130859375,
+        0.8255208333333334,
+        0.861328125
+      ],
+      "basis": "sRGB Rec.709 luminance; F >32 and MAX(L(F),L(S)) >32 for envelope metadata only. Original continuous mask PNG bytes and runtime luminance remain unchanged."
+    },
+    "newUnionFitsInsideExistingFamilyEnvelope": true,
+    "familyFramingUnchanged": true
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

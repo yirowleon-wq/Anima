@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-study-apricot-literary-desk-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "00629c2e6e5b55901244a534145ab3c9d8c2f9c3cbf2ec2de8668f33037ccb04",
+    "background": "75705046089367bc68cb84f5a679dff43f41eb746f28fbb7f26c2924ffa9532b",
+    "F": "bcb7752d297460db826c4add32d93e7ae5d87ce02134a16ab2e0e77987d2ddb8",
+    "S": "09128cff44817ee361ee08b3d897ea70d6c923e2d6492b1d63680cb903055663"
+  },
+  "visibleGeometry": {
+    "actualVisiblePersonEnvelopeSourcePixels": [
+      135,
+      214,
+      453,
+      724
+    ],
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        85,
+        214,
+        453,
+        728
+      ],
+      "normalized": [
+        0.055338541666666664,
+        0.208984375,
+        0.294921875,
+        0.7109375
+      ],
+      "basis": "Read-only luminance>32 diagnostic envelope of actual unmodified F and S, right/bottom exclusive. Includes admitted adjacent receiver/furniture fragments; not pure anatomy or a rendered threshold."
+    },
+    "hiddenFeetSigned": false,
+    "bodyDeformationCertified": false
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

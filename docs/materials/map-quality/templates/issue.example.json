@@ -1,0 +1,20 @@
+{
+  "template_only": true,
+  "record_type": "issue",
+  "issue_id": "__UNSET__",
+  "rule_id": null,
+  "feature_ids": [],
+  "zone_ids": [],
+  "witness_locator": null,
+  "observed": null,
+  "root_cause_hypotheses": [],
+  "claim_refs": [],
+  "severity": null,
+  "state": "untriaged",
+  "owner": null,
+  "duplicate_of": null,
+  "handoff_to": null,
+  "fix_commit": null,
+  "closure_check_ids": [],
+  "severity_change_decision_id": null
+}

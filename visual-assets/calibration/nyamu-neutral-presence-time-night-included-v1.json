@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "scene": "nyamu-neutral-presence-time-night-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "799a1602dc9d40fb3409f75502fa643b6635a25a98fe28f568359db4bbc7a44a",
+    "background": "447d9badea81d18cafbce4260b0c77d5ac27718d1afc00c089249eeae3e7ae1b",
+    "F": "1a47cde2b2f94fd5d7904722b1537a4c95f814979a44fce0498f6cc6bfed2101",
+    "S": "109f82613063077855ae0e414a8bedb231233068bfda2b0597b01de5865cb882"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        841,
+        110,
+        1307,
+        881
+      ],
+      "normalized": [
+        0.5475260416666666,
+        0.107421875,
+        0.8509114583333334,
+        0.8603515625
+      ],
+      "basis": "Read-only sRGB Rec.709 F >32 and MAX(L(F),L(S)) >32 geometry, right/bottom exclusive; original continuous PNG luminance unchanged."
+    },
+    "familyFramingUnchanged": true
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

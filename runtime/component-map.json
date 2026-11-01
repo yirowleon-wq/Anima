@@ -1,0 +1,285 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Engineering lookup for Anima's capabilities and their actual implementations. This is documentation, not another dispatcher, permission grant or personal fact store.",
+  "experience": "A personal companion for learning, making things, playing and returning to the same thought.",
+  "guide": "docs/PROJECT_GUIDE.md",
+  "layers": {
+    "workingSurface": [
+      "src",
+      "prompts",
+      "docs",
+      ".agents/skills",
+      "visual-assets",
+      "examples",
+      "assets/map-v2"
+    ],
+    "implementationSupport": [
+      "node_modules",
+      ".runtime"
+    ],
+    "dependencyIdentityOwners": [
+      "package.json",
+      "package-lock.json",
+      "runtime/hermes/lock.json",
+      "runtime/embedding/lock.json"
+    ],
+    "privateData": "The application's own private data directory, selected before launch; credentials, personal records and diagnostic profiles are not working-material attachments."
+  },
+  "capabilities": [
+    {
+      "id": "conversation",
+      "name": "Conversation with Luna",
+      "implementation": [
+        "src/main/model-selection.ts",
+        "src/main/luna-provider.ts",
+        "src/main/harness.ts",
+        "src/main/runtime/hermes.ts",
+        "runtime/hermes/sidecar.py"
+      ],
+      "contract": "src/shared/model-contract.json",
+      "usableWith": "The machine's own authenticated Codex CLI session, or the existing offline demo choice.",
+      "preserve": "The single conversation, current draft, character judgment, admitted sources and actual response identity.",
+      "futureBlocks": [
+        "01-A",
+        "01-B",
+        "01-C",
+        "05-D"
+      ]
+    },
+    {
+      "id": "reading",
+      "name": "Read together",
+      "implementation": [
+        "src/main/materials/service.ts",
+        "src/main/materials/pdf.ts",
+        "src/main/materials/worker.ts"
+      ],
+      "usableWith": "A chosen TXT, Markdown or PDF, including fictional or public sample material.",
+      "preserve": "Original bytes, page and selection addresses, source revision, movable reading frame and return position.",
+      "futureBlocks": [
+        "01-A",
+        "04-C",
+        "08-B",
+        "08-C"
+      ]
+    },
+    {
+      "id": "notes",
+      "name": "Keep a thought",
+      "implementation": [
+        "src/main/notes/service.ts",
+        "src/renderer/KeepPanel.tsx"
+      ],
+      "usableWith": "Personal writing, a chosen source passage or a saved creation.",
+      "preserve": "The person's words separately from quotations, the original owner, revisions and recoverable drafts.",
+      "futureBlocks": [
+        "03-C",
+        "04-B",
+        "08-C"
+      ]
+    },
+    {
+      "id": "calendar",
+      "name": "Arrange the day",
+      "implementation": [
+        "src/main/actions/local-calendar.ts",
+        "src/main/actions/calendar.ts",
+        "src/main/actions/planning.ts"
+      ],
+      "usableWith": "Chosen local events and an explicit time zone; a sample day is sufficient for development.",
+      "preserve": "Trial versus saved state, original revision, occupied time, preparation and rest, cancellation and undo.",
+      "futureBlocks": [
+        "05-B",
+        "08-A",
+        "12-A"
+      ]
+    },
+    {
+      "id": "memory",
+      "name": "Remember what helps",
+      "implementation": [
+        "src/main/memory/service.ts",
+        "src/main/memory/retrieval.ts"
+      ],
+      "usableWith": "Permitted original conversation and source-backed records. Lexical and neighboring-source reading work without an optional embedding model.",
+      "preserve": "Original evidence, conditions, corrections, exceptions and exact withdrawal lineage.",
+      "futureBlocks": [
+        "03-A",
+        "03-B",
+        "03-C"
+      ]
+    },
+    {
+      "id": "creations",
+      "name": "Make and explore together",
+      "implementation": [
+        "src/main/runtime/interactive-program.ts",
+        "src/main/runtime/interactive-program-local-state.ts",
+        "src/renderer/presentation/program-local-state.ts"
+      ],
+      "usableWith": "An idea, equation, sound, diagram or playful question; personal institutional data is unnecessary.",
+      "preserve": "The same checked program, actual local inputs, send-time state, incremental changes, save and return.",
+      "futureBlocks": [
+        "09-A",
+        "09-B",
+        "09-C",
+        "10-A",
+        "10-C"
+      ]
+    },
+    {
+      "id": "academic-source",
+      "name": "Learning and course material",
+      "implementation": [
+        "src/main/academicAdapter.ts"
+      ],
+      "examples": [
+        "examples/campus-data.example.json",
+        "examples/campus.example.json"
+      ],
+      "usableWith": "Explicit manual or imported records, including clearly declared samples. No student profile or university account is required.",
+      "preserve": "Declared source, time zone, coverage, unknown fields and permission to read.",
+      "futureBlocks": [
+        "02-A",
+        "05-B"
+      ]
+    },
+    {
+      "id": "activity-source",
+      "name": "Activities and places to go",
+      "implementation": [
+        "src/main/campusActivityAdapter.ts"
+      ],
+      "examples": [
+        "examples/campus-activity.example.json"
+      ],
+      "usableWith": "Chosen local activity, event and facility records, including fictional examples.",
+      "preserve": "File selection separately from reading access, original coverage and local completion separately from any real outside acceptance.",
+      "futureBlocks": [
+        "02-A",
+        "02-B",
+        "07-B"
+      ]
+    },
+    {
+      "id": "map",
+      "name": "Explore a place together",
+      "implementation": [
+        "src/main/mapService.ts",
+        "src/renderer/map/CampusMap.tsx",
+        "src/shared/map-routing.ts"
+      ],
+      "data": "assets/map-v2/manifest.json",
+      "usableWith": "The bundled synthetic map, manual points and connected route geometry. Real-campus data requires a separately sourced dataset.",
+      "preserve": "One map surface and camera, route and stop identity, direct takeover, known versus estimated paths and return.",
+      "futureBlocks": [
+        "02-B",
+        "07-A",
+        "07-B",
+        "07-C"
+      ]
+    },
+    {
+      "id": "environment",
+      "name": "Time and atmosphere",
+      "implementation": [
+        "src/main/runtime/environment.ts"
+      ],
+      "usableWith": "A chosen IANA time zone and optional explicit public weather reference; the illustrated room can remain fictional.",
+      "preserve": "Clock and reference location separately, real units, missing observations and illustrated light separately from actual weather.",
+      "futureBlocks": [
+        "05-B",
+        "06-A",
+        "12-A"
+      ]
+    },
+    {
+      "id": "companion",
+      "name": "A recognizable companion",
+      "implementation": [
+        "src/shared/persona.ts",
+        "src/renderer/companion.tsx",
+        "src/renderer/edge-companion-assets.ts",
+        "src/renderer/edge-companion-geometry.ts"
+      ],
+      "materials": [
+        "docs/characters/README.md",
+        "visual-assets/library/index.json"
+      ],
+      "usableWith": "The existing ten character identities, retained art and editable personal character configuration.",
+      "preserve": "Identity and current attention, the existing horizontal cat and its whole-resource quarter-turn docking, interruption and the current draft.",
+      "futureBlocks": [
+        "01-A",
+        "01-C",
+        "06-A",
+        "06-B",
+        "06-C",
+        "10-C"
+      ]
+    },
+    {
+      "id": "ongoing-help",
+      "name": "Leave something in care",
+      "implementation": [
+        "src/main/actions/reminders.ts",
+        "src/main/runtime/attention.ts"
+      ],
+      "usableWith": "An explicit local wish, source subset, time window and stopping condition.",
+      "preserve": "Preparation, presenting, opening and actual completion separately; agreed reminders and the real process lifecycle.",
+      "futureBlocks": [
+        "05-A",
+        "05-C",
+        "05-D",
+        "12-A"
+      ]
+    }
+  ],
+  "support": [
+    {
+      "id": "math-typesetting",
+      "name": "Mathematical typesetting",
+      "package": "katex"
+    },
+    {
+      "id": "document-decoder",
+      "name": "Document decoding",
+      "package": "pdfjs-dist"
+    },
+    {
+      "id": "native-page-renderer",
+      "name": "Native page rendering",
+      "package": "@napi-rs/canvas"
+    },
+    {
+      "id": "map-renderer",
+      "name": "Map rendering",
+      "package": "maplibre-gl"
+    },
+    {
+      "id": "planar-map",
+      "name": "Planar map support",
+      "package": "ol"
+    },
+    {
+      "id": "creation-language",
+      "name": "Checked creation language",
+      "package": "@openuidev/react-lang"
+    },
+    {
+      "id": "tensor-executor",
+      "name": "Optional local tensor execution",
+      "package": "onnxruntime-node",
+      "configuration": "runtime/embedding/lock.json"
+    },
+    {
+      "id": "tokenizer",
+      "name": "Text tokenization",
+      "package": "@huggingface/tokenizers"
+    },
+    {
+      "id": "conversation-loop",
+      "name": "Pinned conversation runtime",
+      "lock": "runtime/hermes/lock.json"
+    }
+  ]
+}

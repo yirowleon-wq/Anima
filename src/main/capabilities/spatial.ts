@@ -1,0 +1,16 @@
+import * as z from 'zod';
+import type { CapabilityBroker } from './broker';
+import { spatialInput, type SpatialService } from '../runtime/spatial';
+
+export function registerSpatial(broker: CapabilityBroker, spatial: SpatialService) {
+  const sourceId = 'map:local', base = { version: '1', output: z.record(z.string(), z.json()), effect: 'read' as const, requiredScopes: ['map:read'], subjects: ['self', 'other', 'fictional'] as ('self' | 'other' | 'fictional')[], worlds: ['real', 'scenario'] as ('real' | 'scenario')[], timeoutMs: 15000, maxBytes: 60000, supportsIdempotency: false, supportsInspect: false, supportsCancel: false };
+  broker.register({ manifest: { id: 'spatial-evidence', version: '1', sourceId, trust: 'bundled_reviewed', egressHosts: [], platforms: ['*'], simulated: false, offline: 'read_cache', license: 'Project-owned adapter; imported data retains its original license', capabilities: [
+    { ...base, version: '4', name: 'map.relations', displayName: "Look at how to get there", description: "Calculate routes and walking-time ranges from place IDs, the user's stated place, saved names or an explicitly selected start. Use bindingId from manage_space.read; role selects a saved place role. departAt previews a departure time and mapVersion retains a prior route version. Start provenance distinguishes manual selection, saved places and device observations; coordinates stay local. Indoor access, current entrance conditions and parking remain unconfirmed.", input: spatialInput },
+    { ...base, name: 'map.reference_search', displayName: "Find names in an overview index", description: "Find place names in an installed authorized overview index, retaining provenance and version. Index identifiers and road-network place identities require a separate match.", input: z.object({ query: z.string().max(100), limit: z.number().int().min(1).max(12).default(5) }).strict() },
+    { ...base, name: 'map.observe', displayName: "Look at an overview image", description: "Observe an authorized overview image for relative buildings and terrain. crop selects a normalized 0–1 rectangle; use the index and route entries for names or distances.", input: z.object({ crop: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1), width: z.number().gt(0).max(1), height: z.number().gt(0).max(1) }).refine(crop => crop.x + crop.width <= 1 && crop.y + crop.height <= 1).optional() }).strict() },
+  ] }, connectionStatus: capability => ({ connected: spatial.available(capability), reason: spatial.available(capability) ? undefined : "This spatial resource is not assembled. Other connected map capabilities remain usable." }), invoke: (name, args, context) => {
+    if (name === 'map.reference_search') return { status: spatial.reference?.overview().connected ? 'fresh' : 'not_connected', sourceId, data: { source: spatial.reference?.overview() || { connected: false }, items: spatial.reference?.search(args.query, args.limit) || [] }, simulated: false };
+    const data = name === 'map.observe' ? spatial.observe(context.scope, args.crop, context.onVisualPrepared) : spatial.relation(context.scope, args);
+    return { status: data.status, sourceId, data, fetchedAt: broker.policy.repo.clock.now(), simulated: false };
+  } }, { reviewed: true, source: 'project-owned spatial and public visual evidence adapter' });
+}

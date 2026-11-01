@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "scene": "umiri-chat-apricot-literary-v2",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "b54800a320a163629dba745183efa63d18a83aa1ae19ba0f9382fdb546b12844",
+    "background": "f9a1a6a33c682a27dd2a8bf40ff361e0c9ceed52bbc7bd811db70694bef8664c",
+    "F": "45e143667fdcba8dc0a09a521bf2f579eba2d11946bb987068ee0646980e19d6",
+    "S": "5123edf75d3c989f9a463d558ccd2989e574c6c1d165a4a65853749e33e55a02"
+  },
+  "visibleGeometry": {
+    "bodyEnvelope": [
+      0.5481770833333334,
+      0.126953125,
+      0.8268229166666666,
+      0.8916015625
+    ],
+    "FWholeCoverageDominantPixelBBox": [
+      848,
+      130,
+      1256,
+      909
+    ],
+    "receiverCoverageDominantPixelBBox": [
+      822,
+      526,
+      1282,
+      924
+    ]
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

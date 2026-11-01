@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "scene": "taki-attention-mist-literary-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "e7eef81215132f5963188f53280341c03bc5374fae84aa9040828a2709f2aa77",
+    "background": "60c0051b14a8f7cc12b29ec0c709b555229ddbe86575c7b5e5ad802d5b4cce96",
+    "F": "6753c170816c1c7415a5628f70ca2d58055a72c84317aa912a82ba7d31ce202b",
+    "S": "ac33cc5cd810098cdd6248cc07a3afa6550abc84a01ceb139b1c78e9fda60a7e"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        835,
+        134,
+        1301,
+        915
+      ],
+      "normalized": [
+        0.5436197916666666,
+        0.130859375,
+        0.8470052083333334,
+        0.8935546875
+      ],
+      "basis": "sRGB Rec.709 luminance; F >32 and MAX(L(F),L(S)) >32 for envelope metadata only. Original continuous mask PNG bytes and runtime luminance remain unchanged."
+    },
+    "newUnionFitsInsideExistingFamilyEnvelope": true,
+    "familyFramingUnchanged": true
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

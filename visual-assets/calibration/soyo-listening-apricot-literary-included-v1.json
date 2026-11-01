@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "scene": "soyo-listening-apricot-literary-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "f242a5b6865d6ac27688ba75bdb8b0e733e6cbb8ea9724b4ea338973288c3862",
+    "background": "fd79e7f727e79c1442be28b3724a1d06ea290b761f17aa3bccc964a9dcaade1a",
+    "F": "e644bdb2df8911ca831b8982e82388418a2879d64223c7df3c23d62d0ea3fa31",
+    "S": "f587afa60db2ddc8adc3765de66ddff2497453d0254ecbde92a804ef00254ca6"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        706,
+        139,
+        1255,
+        905
+      ],
+      "normalized": [
+        0.4596354166666667,
+        0.1357421875,
+        0.8170572916666666,
+        0.8837890625
+      ],
+      "basis": "Read-only MAX(L(F),L(S)) >32 envelope; includes actual local receiver material and soft shoe grounding."
+    }
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

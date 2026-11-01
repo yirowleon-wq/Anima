@@ -1,0 +1,18 @@
+{
+  "template_only": true,
+  "record_type": "decision",
+  "decision_id": "__UNSET__",
+  "type": null,
+  "related_ids": [],
+  "previous_value": null,
+  "proposed_value": null,
+  "new_evidence_refs": [],
+  "reason": null,
+  "impact_scope_locator": null,
+  "independent_reviewer": null,
+  "approval_authority": null,
+  "actual_approval_locator": null,
+  "approved_at": null,
+  "expires_or_invalidates_when": null,
+  "status": "NOT_APPROVED"
+}

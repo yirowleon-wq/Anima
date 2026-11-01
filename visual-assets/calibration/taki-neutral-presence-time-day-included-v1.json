@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "scene": "taki-neutral-presence-time-day-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "66e104b6025d0b65c2ab522a6d76c8cab8cbc94e5ee4edbd3dd2c4d9b5bb6654",
+    "background": "8e2dcd2cb218db1e4e11893e6b796af125b2598af6b3b46c8527e94294c7d86d",
+    "F": "b9ff82fc2013b9b1ce023c095dfcfc9963c4b8d76fa3e81d3064d89d23429788",
+    "S": "f46a4af8afd7506045da052a993aab3114b04f40b78d24df18c4d8b9f225a6e0"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        914,
+        105,
+        1335,
+        924
+      ],
+      "normalized": [
+        0.5950520833333334,
+        0.1025390625,
+        0.869140625,
+        0.90234375
+      ],
+      "basis": "Read-only MAX(L(F),L(S)) >8 envelope including actual fixed local receiver; no contour contraction or alpha change."
+    },
+    "familyFramingCodeUnchanged": true
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

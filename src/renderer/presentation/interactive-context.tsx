@@ -1,0 +1,174 @@
+import { Component, Fragment, createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type ErrorInfo, type ReactNode } from 'react';
+import { useRenderNode, useStateField, type ComponentRenderProps } from '@openuidev/react-lang';
+import { checkedProgramPatch, resetProgramState, validateProgramState, programNodeIdSchema,
+  type InteractiveProgramDocument, type InteractiveStateDeclarations, type ProgramStateValues } from '../../shared/interactive-program';
+import { InteractiveAudioScope, InteractiveSoundToggle } from './interactive-audio';
+import { uiError } from '../ui';
+
+export interface InteractiveHost {
+  document: InteractiveProgramDocument;
+  disabled: boolean;
+  onContinue: (nodeId: string, inputs: ProgramStateValues, label?: string, focus?: boolean) => void;
+  renderSourceSlot?: (ref: string) => ReactNode;
+  scopeKey: string;
+  initialInputs: ProgramStateValues;
+  onLocalChange?: (inputs: ProgramStateValues, change: { origin: ChangeOrigin; fields: string[] }) => void;
+}
+export const InteractiveHostContext = createContext<InteractiveHost | null>(null);
+export type ChangeOrigin = 'manual' | 'control' | 'choice' | 'button' | 'reset' | 'motion' | 'settled';
+interface InteractiveControls {
+  states: InteractiveStateDeclarations;
+  inputs: ProgramStateValues;
+  readInputs: () => ProgramStateValues;
+  disabled: boolean;
+  renderKey: string;
+  scopeKey: string;
+  userAction: { serial: number; origin: Exclude<ChangeOrigin, 'motion' | 'settled'> };
+  patch: (patch: Record<string, unknown>, origin?: Exclude<ChangeOrigin, 'settled'>, nodeId?: string, label?: string) => boolean;
+  reset: (keys?: string[], nodeId?: string, label?: string) => void;
+  continueFrom: (nodeId: string, label?: string) => void;
+  registerMotion: (cancel: () => void, fields: () => readonly string[]) => () => void;
+  acquirePress: (field: string, nodeId: string, pressureField?: string) => boolean;
+  releasePress: (field: string, nodeId: string) => boolean;
+  stopMotions: () => void;
+  settleMotion: (fields: readonly string[]) => void;
+}
+const InteractiveControlsContext = createContext<InteractiveControls | null>(null);
+export function useInteractiveControls() {
+  const value = useContext(InteractiveControlsContext);
+  if (!value) throw new Error('Local inputs must belong to the current interactive document.');
+  return value;
+}
+export const InteractiveGraphicSlot = createContext(false);
+export const InteractivePressAppearance = createContext<'plain' | 'light' | 'dark' | undefined>(undefined);
+
+class InteractivePartBoundary extends Component<{ children: ReactNode; resetKey: string; graphic: boolean }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(error: Error, info: ErrorInfo) { console.error('OpenUI component rendering failed', error, info); }
+  componentDidUpdate(previous: Readonly<{ resetKey: string }>) {
+    if (this.state.failed && previous.resetKey !== this.props.resetKey) this.setState({ failed: false });
+  }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return this.props.graphic ? <g role="img" aria-label="This graphic could not be opened"><title>This graphic could not be opened</title></g>
+      : <div className="interactive-part-error" role="status">This part could not be opened.
+        <button type="button" onClick={() => this.setState({ failed: false })}>Open again</button></div>;
+  }
+}
+
+/** Native renderDeep keys arrays by index. Give actual materialized leaves
+ * their own host-checked node identity, including leaves inside nested Each. */
+export function InteractiveChildren({ value }: { value: unknown }) {
+  const render = useRenderNode(), controls = useContext(InteractiveControlsContext), graphic = useContext(InteractiveGraphicSlot);
+  const leaves: unknown[] = [];
+  const flatten = (child: unknown): void => { if (Array.isArray(child)) child.forEach(flatten); else if (child != null) leaves.push(child); };
+  flatten(value);
+  return <>{leaves.map((child, index) => {
+    const id = child && typeof child === 'object' ? (child as { props?: { id?: unknown } }).props?.id : undefined;
+    return <Fragment key={typeof id === 'string' ? id : `unresolved:${index}`}>
+      <InteractivePartBoundary resetKey={controls?.renderKey || ''} graphic={graphic}>{render(child)}</InteractivePartBoundary>
+    </Fragment>;
+  })}</>;
+}
+
+/** The only writable native binding. Children receive this checked adapter,
+ * never native setters or a triggerAction capable of executing built-ins. */
+export function InteractiveDocument({ props }: ComponentRenderProps<Record<string, any>>) {
+  const host = useContext(InteractiveHostContext);
+  const field = useStateField<ProgramStateValues>('ui', props.ui);
+  const [error, setError] = useState('');
+  const [userAction, setUserAction] = useState<InteractiveControls['userAction']>({ serial: 0, origin: 'manual' });
+  const motions = useRef(new Map<() => void, () => readonly string[]>()), latest = useRef(field.value), setter = useRef(field.setValue);
+  const pressOwners = useRef(new Map<string, { owners: Set<string>; pressureField?: string }>());
+  const admittedScope = useRef(host?.scopeKey);
+  const changingScope = !!host && admittedScope.current !== host.scopeKey;
+  setter.current = field.setValue;
+  const current = useMemo(() => {
+    if (!host || !field.isReactive) return undefined;
+    try { return validateProgramState(host.document.states, changingScope ? host.initialInputs : field.value); } catch { return undefined; }
+  }, [host?.document.states, host?.initialInputs, field.value, field.isReactive, changingScope]);
+  if (current) latest.current = current;
+  const stopMotions = (fields?: readonly string[]) => {
+    for (const [cancel, tracks] of [...motions.current]) if (!fields || tracks().some(key => fields.includes(key))) cancel();
+  };
+  useEffect(() => () => { for (const cancel of motions.current.keys()) cancel(); motions.current.clear(); }, []);
+  // A newly admitted version seeds the same native $ui before paint. Existing
+  // keyed leaves stay mounted, including focused editors and dragged points;
+  // the previous version's finite processes and held inputs stop here.
+  useLayoutEffect(() => {
+    if (!host || !changingScope || !current) return;
+    for (const cancel of motions.current.keys()) cancel();
+    pressOwners.current.clear();
+    admittedScope.current = host.scopeKey;
+    setter.current(current);
+    setUserAction({ serial: 0, origin: 'manual' });
+  }, [host?.scopeKey, changingScope, current]);
+  if (!host || !current) return <div className="interactive-part-error" role="status">Local inputs for this content cannot be restored right now. Reopen it from the original reply.</div>;
+  const patch = (values: Record<string, unknown>, origin: Exclude<ChangeOrigin, 'settled'> = 'manual', nodeId?: string, label?: string) => {
+    if (host.disabled) return false;
+    if (origin !== 'motion') stopMotions(origin === 'button' || origin === 'control' ? Object.keys(values) : undefined);
+    try {
+      const next = checkedProgramPatch(host.document.states, latest.current, values);
+      latest.current = next;
+      if (origin !== 'motion') setUserAction(action => ({ serial: action.serial + 1, origin }));
+      setter.current(next);
+      host.onLocalChange?.(next, { origin, fields: Object.keys(values) });
+      if (origin !== 'motion' && nodeId) {
+        try { host.onContinue(programNodeIdSchema.parse(nodeId), next, label, false); }
+        catch { setError('Local inputs changed. This reference was not added to the original input.'); return true; }
+      }
+      setError(''); return true;
+    } catch (cause) {
+      console.error('OpenUI local input update failed', cause);
+      setError(uiError(cause)); return false;
+    }
+  };
+  const controls: InteractiveControls = {
+    states: host.document.states, inputs: current, readInputs: () => structuredClone(latest.current!), disabled: host.disabled,
+    renderKey: `${host.document.hash}:${JSON.stringify(current)}`, scopeKey: host.scopeKey,
+    userAction: changingScope ? { serial: 0, origin: 'manual' } : userAction, patch, stopMotions: () => stopMotions(),
+    settleMotion(fields) {
+      if (fields.length) host.onLocalChange?.(latest.current!, { origin: 'settled', fields: [...fields] });
+    },
+    registerMotion(cancel, fields) { motions.current.set(cancel, fields); return () => { motions.current.delete(cancel); }; },
+    acquirePress(field, nodeId, pressureField) {
+      const active = pressOwners.current.get(field);
+      if (active) { active.owners.add(nodeId); return false; }
+      pressOwners.current.set(field, { owners: new Set([nodeId]), pressureField }); return true;
+    },
+    releasePress(field, nodeId) {
+      const active = pressOwners.current.get(field);
+      if (!active?.owners.delete(nodeId) || active.owners.size) return false;
+      pressOwners.current.delete(field);
+      // The first holder supplied the pressure. Whichever entrance releases
+      // last must clear that same field, including after the first unmounts.
+      return patch({ [field]: false, ...(active.pressureField ? { [active.pressureField]: 0 } : {}) }, 'control');
+    },
+    reset(keys, nodeId, label) {
+      stopMotions();
+      try {
+        const next = resetProgramState(host.document.states, latest.current, keys);
+        for (const field of keys?.length ? keys : Object.keys(host.document.states)) pressOwners.current.delete(field);
+        patch(next, 'reset', nodeId, label);
+      }
+      catch { setError('Local inputs were not restored. Keep the current content and try again.'); }
+    },
+    continueFrom(nodeId, label) {
+      if (host.disabled) return;
+      stopMotions();
+      try { host.onContinue(programNodeIdSchema.parse(nodeId), validateProgramState(host.document.states, latest.current), label, true); }
+      catch { setError('This reference cannot be added to the input right now. Your draft is preserved.'); }
+    },
+  };
+  return <InteractiveControlsContext.Provider value={controls}><InteractiveAudioScope scopeKey={host.scopeKey}
+    inputs={current} userAction={userAction} disabled={host.disabled}>
+    <article className={`interactive-document${props.presentation === 'flow' ? ' is-flow' : ''}`} data-program-node={props.id} tabIndex={0} aria-label={typeof props.title === 'string' ? props.title : 'Content to explore and change together'}>
+      {props.title && <h3 className="interactive-document-title">{props.title}</h3>}
+      <InteractiveSoundToggle />
+      <InteractiveChildren value={props.children} />
+      {error && <p className="interactive-input-error" role="status">{error}</p>}
+    </article>
+  </InteractiveAudioScope></InteractiveControlsContext.Provider>;
+}

@@ -1,0 +1,115 @@
+{
+  "name": "anima",
+  "productName": "Anima",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "A companion for learning, making things, and living through ordinary days.",
+  "author": "Anima",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "setup": "node scripts/setup-desktop.mjs && npm run setup:hermes",
+    "setup:hermes": "node scripts/setup-hermes.mjs",
+    "dev": "node scripts/dev.mjs",
+    "dev:luna:test": "node scripts/run-luna-test.mjs scripts/dev.mjs",
+    "start:luna:test": "node scripts/run-luna-test.mjs node_modules/electron/cli.js .",
+    "build": "npm run check && node scripts/build-map-bridge.mjs && vite build --logLevel warn && node scripts/build-electron.mjs && npm run build:review",
+    "build:review": "vite build --config vite.review.config.ts --logLevel warn",
+    "review": "vite --config vite.review.config.ts",
+    "preview": "vite preview --config vite.review.config.ts --host 127.0.0.1 --port 4173 --strictPort",
+    "check": "tsc --noEmit",
+    "test": "node scripts/smoke.mjs",
+    "test:hermes": "node --import tsx --test tests/harness/hermes.test.ts",
+    "start": "electron .",
+    "package": "npm run build && node scripts/stage-hermes-runtime.mjs && electron-builder --config build/hermes-builder.json --win portable --x64",
+    "map:import": "node scripts/import-map.mjs",
+    "export:review": "node scripts/export-review.mjs",
+    "package:mac": "npm run build && node scripts/stage-hermes-runtime.mjs && electron-builder --config build/hermes-builder.json --mac dir --x64"
+  },
+  "build": {
+    "appId": "studio.anima.desktop",
+    "productName": "Anima",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "!dist-electron/material-runtime{,/**/*}",
+      "!dist-electron/embedding-runtime{,/**/*}",
+      "assets/map-v2/**/*",
+      "visual-assets/runtime/art/brand/window-gold.png",
+      "package.json"
+    ],
+    "asar": true,
+    "extraResources": [],
+    "win": {
+      "target": "portable",
+      "icon": "visual-assets/runtime/art/brand/window-gold.ico",
+      "signAndEditExecutable": true
+    },
+    "portable": {
+      "artifactName": "Anima-${version}-Windows.exe"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "mac": {
+      "target": "dir",
+      "category": "public.app-category.education",
+      "artifactName": "Anima-${version}-macOS-${arch}.${ext}"
+    }
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@huggingface/tokenizers": "0.2.0",
+    "@maplibre/maplibre-gl-style-spec": "26.4.4",
+    "@napi-rs/canvas": "1.0.6",
+    "@noble/hashes": "2.4.0",
+    "@openuidev/lang-core": "1.0.1",
+    "@openuidev/react-lang": "1.0.1",
+    "@xmldom/xmldom": "0.9.12",
+    "earcut": "3.2.4",
+    "katex": "0.18.2",
+    "lucide-react": "1.43.0",
+    "maplibre-gl": "6.11.2",
+    "ol": "10.10.0",
+    "onnxruntime-node": "1.30.0",
+    "pdfjs-dist": "6.2.108",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-markdown": "10.1.0",
+    "rehype-katex": "7.0.1",
+    "remark-gfm": "4.0.1",
+    "remark-math": "6.0.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.5.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "6.1.1",
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
+    "osmtogeojson": "3.0.0-beta.5",
+    "prettier": "3.9.6",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vite": "8.2.2"
+  },
+  "overrides": {
+    "@xmldom/xmldom": "0.9.12",
+    "katex": "0.18.2",
+    "global-agent": "4.1.3"
+  },
+  "packageManager": "npm@11.16.0",
+  "engines": {
+    "node": ">=24.18.0 <25",
+    "npm": "11.16.0"
+  },
+  "allowScripts": {
+    "electron": true,
+    "electron-winstaller": true,
+    "esbuild": true
+  }
+}

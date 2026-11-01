@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "scene": "sakiko-attention-apricot-shared-page-included-v2",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "f04805d0e723420c48cf4e16005d4c863df50042339c65290a34491e553de238",
+    "background": "a1d2b37b4f404b4217a093ca22c1cda916e227922822c32859faf7f6901931bf",
+    "F": "63c8a0a3953f741cc687f324f4045f5856506de3010d84f92c85f94f24d81b46",
+    "S": "68cede6cd8df635abb1208bb1829d8f6ca67cd8528aa8de434999f60a78927f0"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        849,
+        112,
+        1376,
+        948
+      ],
+      "normalized": [
+        0.552734375,
+        0.109375,
+        0.8958333333333334,
+        0.92578125
+      ],
+      "basis": "sRGB Rec.709 luminance; F >32, S >32 and MAX(L(F),L(S)) >32 are read-only envelope metadata only. Original continuous ImageGen mask PNG bytes and runtime luminance are unchanged; no thresholded or hand-edited image is created."
+    },
+    "candidateSevenUnionPixels": [
+      762,
+      86,
+      1378,
+      955
+    ],
+    "candidateSevenProtectedPixels": [
+      666,
+      74,
+      1474,
+      967
+    ],
+    "candidateSevenProtectedHeight": 893,
+    "cameraFunctionModified": false
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

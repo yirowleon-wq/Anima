@@ -1,0 +1,35 @@
+{
+  "template_only": true,
+  "record_type": "review",
+  "review_id": "__UNSET__",
+  "scope_id": null,
+  "member_ids_locator": null,
+  "membership_hash": null,
+  "sampling": {
+    "mode": null,
+    "seed": null,
+    "population": null,
+    "sampled_ids": [],
+    "unsampled_count": null,
+    "systemic_failure_escalation": null
+  },
+  "view": {
+    "id": null,
+    "center": null,
+    "scale_or_zoom": null,
+    "bearing": null,
+    "pitch": null,
+    "viewport_px": null,
+    "device_pixel_ratio": null,
+    "interaction_state": null
+  },
+  "input_versions": {},
+  "questions": [],
+  "observations": [],
+  "claim_refs": [],
+  "issues_created": [],
+  "not_reviewed": [],
+  "verdict": "NOT_REVIEWED",
+  "reviewer": null,
+  "reviewed_at": null
+}

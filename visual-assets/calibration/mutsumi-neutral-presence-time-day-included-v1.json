@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "scene": "mutsumi-neutral-presence-time-day-included-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "8c1d8e006fa332a85a9d7fed40989170fce6f6956a0b18e351efa83f29404f6f",
+    "background": "8521185ea7e37ce08f9dd015dbc36cd5b5bb4dc1620fc5471469392e36176c7a",
+    "F": "9961af4ec90629af0afe86f56ead3d6b2619f736b8ef8c18c428fffdc30ba69a",
+    "S": "115452400c70025e781ad271eedba5b93460199cd345a76f3176e6ce1653d611"
+  },
+  "visibleGeometry": {
+    "jointReceiverEnvelope": {
+      "sourcePixels": [
+        852,
+        128,
+        1339,
+        955
+      ],
+      "normalized": [
+        0.5546875,
+        0.125,
+        0.8717447916666666,
+        0.9326171875
+      ],
+      "basis": "Read-only MAX(L(F),L(S)) >32 envelope, complete actual fixed seat/wood receiver included, not tightened."
+    },
+    "familyFramingCodeUnchanged": true
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}

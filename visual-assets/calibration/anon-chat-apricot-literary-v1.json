@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "scene": "anon-chat-apricot-literary-v1",
+  "canvas": [
+    1536,
+    1024
+  ],
+  "sourceSha256": {
+    "mother": "53ee79ee3e5e210fc875d6ed062543c21cc2001831ede42dad814367a6103b7c",
+    "background": "f9a1a6a33c682a27dd2a8bf40ff361e0c9ceed52bbc7bd811db70694bef8664c",
+    "F": "c4aba1f3593f5255b56c2bdcf14873fc5400f8c9fc6e71f346df1c3f00cca0fd",
+    "S": "39b57bb13040463ed0d70a1403e8475100fc5974b5bae8d2e1ccca73c18dbc9c"
+  },
+  "visibleGeometry": {
+    "actualVisibleBodyEnvelope": [
+      0.3971354166666667,
+      0.10546875,
+      0.6119791666666666,
+      0.8125
+    ],
+    "FWholeCoverageDominantPixelBBox": [
+      612,
+      109,
+      937,
+      829
+    ],
+    "receiverCoverageDominantPixelBBox": [
+      608,
+      528,
+      1025,
+      837
+    ],
+    "knownIncludedMaterialNotBody": []
+  },
+  "scope": "Exact source canvas and visible support references. This record does not certify unseen anatomy, free movement between furniture, or runtime behavior."
+}
